@@ -1,59 +1,43 @@
 <?php
-// signal.php
-
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
 session_start();
-header('Content-Type: application/json');
 
-// In-memory store, only survives per-process (good for CLI debug or FPM long-run script)
-// Real-world: Replace with APCu, Redis, SQLite, or file cache
+header("Content-Type: application/json");
 
-if (!isset($_SESSION['signal_rooms'])) {
-    $_SESSION['signal_rooms'] = [];
-}
+// 允许 CORS 测试（可选）
+header("Access-Control-Allow-Origin: *");
 
-$method = $_SERVER['REQUEST_METHOD'];
-
-function respond($status, $message = '') {
-    http_response_code($status);
-    if ($message !== '') echo json_encode(["error" => $message]);
+function json_response($data, $code = 200) {
+    http_response_code($code);
+    echo json_encode($data);
     exit;
 }
 
-function get_room_ref(&$store, $room) {
-    if (!isset($store[$room])) {
-        $store[$room] = ["sender" => null, "receiver" => null, "timestamp" => time()];
-    }
-    return $store[$room];
-}
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $raw = file_get_contents("php://input");
+    $data = json_decode($raw, true);
 
-$room = $_GET['room'] ?? ($_POST['room'] ?? '');
-$role = $_GET['role'] ?? ($_POST['role'] ?? '');
-
-if (!$room || !$role || !in_array($role, ['sender', 'receiver'])) {
-    respond(400, "Missing or invalid room/role");
-}
-
-if ($method === 'POST') {
-    $input = json_decode(file_get_contents('php://input'), true);
-    if (!isset($input['data'])) respond(400, "Missing data");
-
-    $_SESSION['signal_rooms'][$room][$role] = [
-        "data" => $input['data'],
-        "timestamp" => time()
-    ];
-    respond(200);
-
-} elseif ($method === 'GET') {
-    $peerRole = $role === 'sender' ? 'receiver' : 'sender';
-    $entry = $_SESSION['signal_rooms'][$room][$peerRole] ?? null;
-
-    if ($entry && time() - $entry['timestamp'] < 60) {
-        echo $entry['data'];
-        exit;
-    } else {
-        respond(204); // No content
+    if (!$data || !isset($data['room']) || !isset($data['role']) || !isset($data['data'])) {
+        json_response(["error" => "Missing or invalid room/role/data"], 400);
     }
 
-} else {
-    respond(405, "Only GET/POST allowed");
+    $_SESSION[$data['room']][$data['role']] = $data['data'];
+    json_response(["status" => "ok"]);
 }
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    $room = $_GET['room'] ?? null;
+    $role = $_GET['role'] ?? null;
+
+    if (!$room || !$role || !in_array($role, ['sender', 'receiver'])) {
+        json_response(["error" => "Missing or invalid room/role"], 400);
+    }
+
+    $peer = $role === 'sender' ? 'receiver' : 'sender';
+    $data = $_SESSION[$room][$peer] ?? "";
+    echo $data;
+    exit;
+}
+
+json_response(["error" => "Unsupported method"], 405);
