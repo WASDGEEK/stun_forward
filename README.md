@@ -1,33 +1,26 @@
 # STUN Forward
 
-This tool creates a tunnel between two peers (a `sender` and a `receiver`) behind NATs, enabling functionality similar to port forwarding. It uses a signaling server to exchange peer connection information (discovered via STUN) to establish a direct P2P connection.
-
-This is useful for exposing a service running on a machine behind a restrictive firewall or NAT to the public internet, without requiring manual port forwarding configuration on the router.
+A simple P2P port forwarding tool that creates secure tunnels between a **client** and **server** behind NATs, enabling direct access to services without manual router configuration.
 
 ## Features
 
--   TCP and UDP forwarding
--   Configuration via a simple JSON file
--   NAT traversal using STUN
--   Independent PHP-based signaling server for easy deployment
+- **Simple Client/Server Model**: Client decides port mappings, server just runs
+- **Smart Connection**: Automatically detects LAN and uses direct connection when possible
+- **TCP and UDP Support**: Forward any protocol
+- **YAML Configuration**: Human-friendly config files
+- **NAT Traversal**: Uses STUN for public internet connections
+- **Zero Configuration Server**: Server needs no port mapping setup
 
 ## How It Works
 
-1.  A **Signaling Server** (`index.php`) is deployed on a publicly accessible web server.
-2.  Both the `sender` and `receiver` clients connect to a **STUN Server** (e.g., `stun.l.google.com:19302`) to discover their own public IP address and port.
-3.  The clients post their public address and a shared **Room ID** to the signaling server.
-4.  They then poll the signaling server to retrieve their peer's public address.
-5.  Once the addresses are exchanged, they attempt to establish a direct P2P connection (hole punching).
-6.  The `sender` listens on a local port and forwards all traffic to the `receiver`'s public address.
-7.  The `receiver` forwards the traffic from the `sender` to a specified local service.
+1. **Server** starts and registers its network info (both public and private IPs) with the signaling server
+2. **Client** connects and discovers the server's network information
+3. **Smart Routing**: If both are on the same LAN, uses direct local connection; otherwise uses STUN for NAT traversal
+4. **Port Forwarding**: Client listens on specified local ports and forwards traffic to server ports
 
-## Installation
+## Quick Start
 
-### Client (`stun_forward`)
-
-You need to have Go installed on your system.
-
-Clone the repository and build the executable:
+### 1. Install
 
 ```bash
 git clone https://github.com/WASDGEEK/stun_forward.git
@@ -35,70 +28,123 @@ cd stun_forward
 go build -o stun_forward .
 ```
 
-### Signaling Server (`index.php`)
+### 2. Setup Signaling Server
 
-You need a web server with PHP. Simply upload the `index.php` file to your server.
+Upload `index.php` to any web server with PHP support.
 
-## Configuration
+### 3. Configure
 
-The `stun_forward` client is configured using a JSON file. Copy the `config.json.example` to `config.json` and edit it for your needs.
-
-**`config.json` fields:**
-
--   `mode`: `"sender"` or `"receiver"`.
--   `room`: A secret string that both peers must share to be matched.
--   `signalURL`: The full URL to your `index.php` signaling server.
--   `stunServer`: (Optional) The STUN server to use. Defaults to `stun.l.google.com:19302`.
--   `mappings`: An array of port mapping strings in the format `"proto:localPort:remotePort"`.
-
-## Usage
-
-### 1. Create Configurations
-
-Create two `config.json` files, one for the sender and one for the receiver.
-
-**Receiver `config.json`:**
-(Exposes local service on port 22, listens for peer on port 5000)
-```json
-{
-  "mode": "receiver",
-  "room": "mysecretssh",
-  "signalURL": "http://your-server.com/index.php",
-  "mappings": [
-    "tcp:22:5000"
-  ]
-}
+**Server (config.yml):**
+```yaml
+mode: server
+roomId: "my-secret-room"
+signalingUrl: "http://your-server.com/signal.php"
 ```
 
-**Sender `config.json`:**
-(Listens locally on port 5001, connects to peer on port 5000)
-```json
-{
-  "mode": "sender",
-  "room": "mysecretssh",
-  "signalURL": "http://your-server.com/index.php",
-  "mappings": [
-    "tcp:5001:5000"
-  ]
-}
+**Client (config.yml):**
+```yaml
+mode: client
+roomId: "my-secret-room"  # Must match server
+signalingUrl: "http://your-server.com/signal.php"
+mappings:
+  - "tcp:8080:22"    # Local 8080 -> Server 22 (SSH)
+  - "tcp:3306:3306"  # Local 3306 -> Server 3306 (MySQL)
+  - "udp:5000:53"    # Local 5000 -> Server 53 (DNS)
 ```
 
-### 2. Run the Clients
+### 4. Run
 
-On the receiver machine:
+**On the server machine:**
 ```bash
-./stun_forward --config /path/to/receiver_config.json
+./stun_forward
 ```
 
-On the sender machine:
+**On the client machine:**
 ```bash
-./stun_forward --config /path/to/sender_config.json
+./stun_forward
 ```
 
-### 3. Test the Connection
+Both will automatically use `config.yml` in the current directory.
 
-Now, any traffic sent to the `sender`'s local port `5001` will be forwarded to the `receiver`'s local service on port `22`.
+### 5. Use
+
+Now you can access server services through client:
+```bash
+# SSH to server via client
+ssh user@127.0.0.1 -p 8080
+
+# Connect to MySQL on server via client  
+mysql -h 127.0.0.1 -P 3306 -u user -p
+```
+
+## Configuration Options
+
+### Global Settings
+
+- `mode`: `"client"` or `"server"`
+- `roomId`: Shared secret for peer matching
+- `signalingUrl`: URL to your signaling server (`index.php`)
+- `stunServer`: STUN server for NAT traversal (optional, defaults to Google's)
+
+### Client-Only Settings
+
+- `mappings`: Array of port forwarding rules in format `"protocol:localPort:serverPort"`
+
+### Supported Formats
+
+Both YAML (`.yml`, `.yaml`) and JSON (`.json`) configuration files are supported.
+
+## Advanced Usage
+
+### Custom Config File
 
 ```bash
-ssh user@127.0.0.1 -p 5001
+./stun_forward --config /path/to/my-config.yml
 ```
+
+### LAN Optimization
+
+The tool automatically detects when client and server are on the same LAN and uses direct connection, bypassing STUN for better performance and reliability.
+
+### Multiple Services
+
+Add as many port mappings as needed in the client config:
+
+```yaml
+mappings:
+  - "tcp:2222:22"    # SSH
+  - "tcp:8080:80"    # HTTP
+  - "tcp:8443:443"   # HTTPS
+  - "udp:5353:53"    # DNS
+  - "tcp:5432:5432"  # PostgreSQL
+```
+
+## Architecture
+
+- **Client**: Actively connects to server, manages port mappings
+- **Server**: Passively waits for connections, serves local services
+- **Signaling Server**: Simple PHP script for peer discovery
+- **STUN Server**: External service for NAT traversal (only used when needed)
+
+## Security Notes
+
+- Use strong, unique `roomId` values
+- Run signaling server over HTTPS in production  
+- Consider VPN for sensitive data
+- The tool creates direct P2P connections when possible
+
+## Troubleshooting
+
+### Connection Issues
+- Ensure both client and server use the same `roomId`
+- Check that signaling server is accessible from both sides
+- Verify firewall settings allow the application
+
+### LAN Detection
+- Tool automatically prefers LAN connections when available
+- Check logs to see whether LAN or WAN connection is being used
+- Private IP detection works for standard ranges (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+
+### Port Conflicts
+- Ensure local ports on client are not already in use
+- Server ports must be available and not blocked by firewall

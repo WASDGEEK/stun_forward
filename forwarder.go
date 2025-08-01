@@ -40,15 +40,15 @@ func tcpProxy(ctx context.Context, src, dst net.Conn, direction string) {
 	}
 }
 
-// runTCPSender runs TCP sender forwarding
-func runTCPSender(ctx context.Context, localPort int, remoteIP string, remotePort int) {
+// runTCPClient runs TCP client forwarding (listens locally, connects to server)
+func runTCPClient(ctx context.Context, localPort int, remoteIP string, remotePort int) {
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(localPort))
 	if err != nil {
-		log.Fatalf("TCP sender listen error: %v", err)
+		log.Fatalf("TCP client listen error: %v", err)
 	}
 	defer ln.Close()
 
-	log.Printf("TCP Sender listening on port %d, forwarding to %s:%d", localPort, remoteIP, remotePort)
+	log.Printf("TCP Client listening on port %d, forwarding to %s:%d", localPort, remoteIP, remotePort)
 
 	for {
 		select {
@@ -59,7 +59,7 @@ func runTCPSender(ctx context.Context, localPort int, remoteIP string, remotePor
 
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("TCP sender accept error: %v", err)
+			log.Printf("TCP client accept error: %v", err)
 			continue
 		}
 
@@ -68,23 +68,23 @@ func runTCPSender(ctx context.Context, localPort int, remoteIP string, remotePor
 			
 			peer, err := net.Dial("tcp", net.JoinHostPort(remoteIP, strconv.Itoa(remotePort)))
 			if err != nil {
-				log.Printf("TCP sender dial error: %v", err)
+				log.Printf("TCP client dial error: %v", err)
 				return
 			}
 
 			var wg sync.WaitGroup
 			wg.Add(2)
 
-			// Client to peer
+			// Client to server
 			go func() {
 				defer wg.Done()
-				tcpProxy(ctx, c, peer, "client->peer")
+				tcpProxy(ctx, c, peer, "client->server")
 			}()
 
-			// Peer to client
+			// Server to client
 			go func() {
 				defer wg.Done() 
-				tcpProxy(ctx, peer, c, "peer->client")
+				tcpProxy(ctx, peer, c, "server->client")
 			}()
 
 			wg.Wait()
@@ -92,15 +92,15 @@ func runTCPSender(ctx context.Context, localPort int, remoteIP string, remotePor
 	}
 }
 
-// runTCPReceiver runs TCP receiver forwarding
-func runTCPReceiver(ctx context.Context, m PortMapping, peerHost string, peerPort int) {
+// runTCPServer runs TCP server forwarding (accepts connections, forwards to local service)
+func runTCPServer(ctx context.Context, m PortMapping, peerHost string, peerPort int) {
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(m.RemotePort))
 	if err != nil {
-		log.Fatalf("TCP receiver listen error: %v", err)
+		log.Fatalf("TCP server listen error: %v", err)
 	}
 	defer ln.Close()
 
-	log.Printf("TCP Receiver listening on port %d, forwarding to local service 127.0.0.1:%d", m.RemotePort, m.LocalPort)
+	log.Printf("TCP Server listening on port %d, forwarding to local service 127.0.0.1:%d", m.RemotePort, m.LocalPort)
 
 	for {
 		select {
@@ -111,7 +111,7 @@ func runTCPReceiver(ctx context.Context, m PortMapping, peerHost string, peerPor
 
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("TCP receiver accept error: %v", err)
+			log.Printf("TCP server accept error: %v", err)
 			continue
 		}
 
@@ -120,23 +120,23 @@ func runTCPReceiver(ctx context.Context, m PortMapping, peerHost string, peerPor
 
 			local, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(m.LocalPort)))
 			if err != nil {
-				log.Printf("TCP receiver dial local service error: %v", err)
+				log.Printf("TCP server dial local service error: %v", err)
 				return
 			}
 
 			var wg sync.WaitGroup
 			wg.Add(2)
 
-			// Peer to local service
+			// Client to local service
 			go func() {
 				defer wg.Done()
-				tcpProxy(ctx, c, local, "peer->local")
+				tcpProxy(ctx, c, local, "client->local")
 			}()
 
-			// Local service to peer
+			// Local service to client
 			go func() {
 				defer wg.Done()
-				tcpProxy(ctx, local, c, "local->peer")
+				tcpProxy(ctx, local, c, "local->client")
 			}()
 
 			wg.Wait()
@@ -144,19 +144,19 @@ func runTCPReceiver(ctx context.Context, m PortMapping, peerHost string, peerPor
 	}
 }
 
-// runUDPSender runs UDP sender forwarding
-func runUDPSender(ctx context.Context, localPort int, remoteIP string, remotePort int) {
+// runUDPClient runs UDP client forwarding (listens locally, forwards to server)
+func runUDPClient(ctx context.Context, localPort int, remoteIP string, remotePort int) {
 	localAddr := net.UDPAddr{Port: localPort}
 	conn, err := net.ListenUDP("udp", &localAddr)
 	if err != nil {
-		log.Fatalf("UDP sender listen error: %v", err)
+		log.Fatalf("UDP client listen error: %v", err)
 	}
 	defer conn.Close()
 
 	remoteAddr := net.UDPAddr{IP: net.ParseIP(remoteIP), Port: remotePort}
 	buf := make([]byte, UDPBufferSize)
 	
-	log.Printf("UDP Sender listening on port %d, forwarding to %s:%d", localPort, remoteIP, remotePort)
+	log.Printf("UDP Client listening on port %d, forwarding to %s:%d", localPort, remoteIP, remotePort)
 
 	for {
 		select {
@@ -167,33 +167,33 @@ func runUDPSender(ctx context.Context, localPort int, remoteIP string, remotePor
 
 		n, clientAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			log.Printf("UDP sender read error: %v", err)
+			log.Printf("UDP client read error: %v", err)
 			continue
 		}
 
-		// Forward to remote peer
+		// Forward to remote server
 		go func(data []byte, client *net.UDPAddr) {
 			_, err := conn.WriteToUDP(data, &remoteAddr)
 			if err != nil {
-				log.Printf("UDP sender write to remote error: %v", err)
+				log.Printf("UDP client write to remote error: %v", err)
 			}
 		}(buf[:n], clientAddr)
 	}
 }
 
-// runUDPReceiver runs UDP receiver forwarding
-func runUDPReceiver(ctx context.Context, m PortMapping, peerHost string, peerPort int) {
+// runUDPServer runs UDP server forwarding (accepts packets, forwards to local service)
+func runUDPServer(ctx context.Context, m PortMapping, peerHost string, peerPort int) {
 	localPeerAddr := net.UDPAddr{Port: m.RemotePort}
 	conn, err := net.ListenUDP("udp", &localPeerAddr)
 	if err != nil {
-		log.Fatalf("UDP receiver listen error: %v", err)
+		log.Fatalf("UDP server listen error: %v", err)
 	}
 	defer conn.Close()
 
 	localServiceAddr := net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: m.LocalPort}
 	buf := make([]byte, UDPBufferSize)
 
-	log.Printf("UDP Receiver listening on port %d, forwarding to local service 127.0.0.1:%d", m.RemotePort, m.LocalPort)
+	log.Printf("UDP Server listening on port %d, forwarding to local service 127.0.0.1:%d", m.RemotePort, m.LocalPort)
 
 	for {
 		select {
@@ -204,7 +204,7 @@ func runUDPReceiver(ctx context.Context, m PortMapping, peerHost string, peerPor
 
 		n, peerAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			log.Printf("UDP receiver read error: %v", err)
+			log.Printf("UDP server read error: %v", err)
 			continue
 		}
 
@@ -212,7 +212,7 @@ func runUDPReceiver(ctx context.Context, m PortMapping, peerHost string, peerPor
 		go func(data []byte, peer *net.UDPAddr) {
 			_, err := conn.WriteToUDP(data, &localServiceAddr)
 			if err != nil {
-				log.Printf("UDP receiver write to local service error: %v", err)
+				log.Printf("UDP server write to local service error: %v", err)
 			}
 		}(buf[:n], peerAddr)
 	}

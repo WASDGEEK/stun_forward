@@ -1,0 +1,8 @@
+mode: client
+roomId: "my-room-123"
+signalingUrl: "http://your-server.com/signal.php"
+stunServer: "stun.l.google.com:19302"
+mappings:
+  - "tcp:8080:22"    # Local port 8080 -> Server port 22 (SSH)
+  - "tcp:3306:3306"  # Local port 3306 -> Server port 3306 (MySQL)
+  - "udp:5000:53"    # Local port 5000 -> Server port 53 (DNS)
