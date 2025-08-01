@@ -4,8 +4,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -44,9 +44,9 @@ func handleMapping(cfg Config, m PortMap) {
 		log.Fatalf("Waiting for peer failed: %v", err)
 	}
 
-	host, portStr, ok := strings.Cut(peerInfo, ":")
-	if !ok {
-		log.Fatalf("Invalid peer info format: %s", peerInfo)
+	host, portStr, err := net.SplitHostPort(peerInfo)
+	if err != nil {
+		log.Fatalf("Invalid peer info format: %s, error: %v", peerInfo, err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
@@ -63,9 +63,9 @@ func handleMapping(cfg Config, m PortMap) {
 	} else {
 		// receiver listens on its peer port, connects to local service
 		if m.Proto == "tcp" {
-			tcpReceiver(m.LocalPort, host, port)
+			tcpReceiver(m, host, port)
 		} else {
-			udpReceiver(m.LocalPort, host, port)
+			udpReceiver(m, host, port)
 		}
 	}
 }

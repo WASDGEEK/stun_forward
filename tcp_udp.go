@@ -31,21 +31,23 @@ func tcpSender(localPort int, remoteIP string, remotePort int) {
 	}
 }
 
-func tcpReceiver(localPort int, remoteIP string, remotePort int) {
-	peer, err := net.Listen("tcp", ":"+strconv.Itoa(remotePort))
+func tcpReceiver(m PortMap, peerHost string, peerPort int) {
+	// Receiver listens on its RemotePort for connections from the sender
+	ln, err := net.Listen("tcp", ":"+strconv.Itoa(m.RemotePort))
 	if err != nil {
 		log.Fatalf("tcpReceiver listen error: %v", err)
 	}
 	for {
-		conn, err := peer.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			log.Printf("tcpReceiver accept error: %v", err)
 			continue
 		}
 		go func(c net.Conn) {
-			local, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(localPort))
+			// Receiver connects to the local service on LocalPort
+			local, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(m.LocalPort)))
 			if err != nil {
-				log.Printf("tcpReceiver dial error: %v", err)
+				log.Printf("tcpReceiver dial local service error: %v", err)
 				return
 			}
 			go io.Copy(local, c)
@@ -70,18 +72,23 @@ func udpSender(localPort int, remoteIP string, remotePort int) {
 	}
 }
 
-func udpReceiver(localPort int, remoteIP string, remotePort int) {
-	remoteAddr := net.UDPAddr{IP: net.ParseIP(remoteIP), Port: remotePort}
-	conn, err := net.ListenUDP("udp", &remoteAddr)
+func udpReceiver(m PortMap, peerHost string, peerPort int) {
+	// Receiver listens on its RemotePort for packets from the sender
+	localPeerAddr := net.UDPAddr{Port: m.RemotePort}
+	conn, err := net.ListenUDP("udp", &localPeerAddr)
 	if err != nil {
 		log.Fatalf("udpReceiver listen error: %v", err)
 	}
-	localAddr := net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: localPort}
+
+	// Address of the local service to forward to
+	localServiceAddr := net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: m.LocalPort}
+
 	buf := make([]byte, 2048)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err == nil {
-			conn.WriteToUDP(buf[:n], &localAddr)
+			// Forward received packet to local service
+			conn.WriteToUDP(buf[:n], &localServiceAddr)
 		}
 	}
 }
