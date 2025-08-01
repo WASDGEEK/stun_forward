@@ -35,7 +35,7 @@ jobs:
         CGO_ENABLED: 0
       run: |
         mkdir -p dist
-        output="keyforward-${GOOS}-${GOARCH}"
+        output="stun_forward-${GOOS}-${GOARCH}"
         if [ "$GOOS" = "windows" ]; then
           output="${output}.exe"
         fi
@@ -44,7 +44,7 @@ jobs:
     - name: Compress
       run: |
         cd dist
-        base="keyforward-${{ matrix.goos }}-${{ matrix.goarch }}"
+        base="stun_forward-${{ matrix.goos }}-${{ matrix.goarch }}"
         if [ "${{ matrix.goos }}" = "windows" ]; then
           zip "${base}.zip" "${base}.exe"
           rm "${base}.exe"
@@ -76,13 +76,13 @@ jobs:
         CGO_ENABLED: 0
       run: |
         mkdir -p dist
-        go build -o dist/keyforward-darwin-arm64 ./...
+        go build -o dist/stun_forward-darwin-arm64 ./...
 
     - name: Compress
       run: |
         cd dist
-        tar -czf keyforward-darwin-arm64.tar.gz keyforward-darwin-arm64
-        rm keyforward-darwin-arm64
+        tar -czf stun_forward-darwin-arm64.tar.gz stun_forward-darwin-arm64
+        rm stun_forward-darwin-arm64
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
