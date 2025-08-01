@@ -32,7 +32,7 @@ func tcpSender(localPort int, remoteIP string, remotePort int) {
 }
 
 func tcpReceiver(localPort int, remoteIP string, remotePort int) {
-	peer, err := net.Listen("tcp", ":"+strconv.Itoa(localPort))
+	peer, err := net.Listen("tcp", ":"+strconv.Itoa(remotePort))
 	if err != nil {
 		log.Fatalf("tcpReceiver listen error: %v", err)
 	}
@@ -43,7 +43,7 @@ func tcpReceiver(localPort int, remoteIP string, remotePort int) {
 			continue
 		}
 		go func(c net.Conn) {
-			local, err := net.Dial("tcp", net.JoinHostPort(remoteIP, strconv.Itoa(remotePort)))
+			local, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(localPort))
 			if err != nil {
 				log.Printf("tcpReceiver dial error: %v", err)
 				return
@@ -71,17 +71,17 @@ func udpSender(localPort int, remoteIP string, remotePort int) {
 }
 
 func udpReceiver(localPort int, remoteIP string, remotePort int) {
-	localAddr := net.UDPAddr{Port: localPort}
-	conn, err := net.ListenUDP("udp", &localAddr)
+	remoteAddr := net.UDPAddr{IP: net.ParseIP(remoteIP), Port: remotePort}
+	conn, err := net.ListenUDP("udp", &remoteAddr)
 	if err != nil {
 		log.Fatalf("udpReceiver listen error: %v", err)
 	}
-	remoteAddr := net.UDPAddr{IP: net.ParseIP(remoteIP), Port: remotePort}
+	localAddr := net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: localPort}
 	buf := make([]byte, 2048)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err == nil {
-			conn.WriteToUDP(buf[:n], &remoteAddr)
+			conn.WriteToUDP(buf[:n], &localAddr)
 		}
 	}
 }

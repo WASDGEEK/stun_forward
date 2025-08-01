@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"time"
 )
@@ -39,13 +39,26 @@ func WaitForPeerData(url, peerRole, room string, timeout time.Duration) (string,
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(fmt.Sprintf("%s?role=%s&room=%s", url, peerRole, room))
-		if err == nil && resp.StatusCode == 200 {
-			body, _ := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		if resp.StatusCode == 200 {
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				resp.Body.Close()
+				time.Sleep(1 * time.Second)
+				continue
+			}
 			resp.Body.Close()
 			if len(body) > 0 {
 				return string(body), nil
 			}
+		} else {
+			resp.Body.Close()
 		}
+
 		time.Sleep(1 * time.Second)
 	}
 	return "", errors.New("timeout waiting for peer data")

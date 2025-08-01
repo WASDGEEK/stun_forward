@@ -8,11 +8,17 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "", "sender or receiver")
+	mode := flag.String("mode", "", "sender, receiver, or server")
 	room := flag.String("room", "", "Room ID to match peers")
 	signalURL := flag.String("signal", "", "Signal server URL")
 	maps := flag.String("map", "", "Comma-separated port mappings. Format: proto:local:remote")
+	port := flag.String("port", "8080", "Port for the signal server to listen on")
 	flag.Parse()
+
+	if *mode == "server" {
+		runServer(*port)
+		return
+	}
 
 	if *mode != "sender" && *mode != "receiver" {
 		log.Fatal("--mode must be sender or receiver")
