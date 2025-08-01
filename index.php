@@ -1,16 +1,32 @@
 <?php
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
-session_start();
+
+// Simple in-memory store using a file.
+// For a real application, use Redis, Memcached, or a database.
+$storageFile = '/tmp/stun_forward_session.json';
+
+function get_store() {
+    global $storageFile;
+    if (!file_exists($storageFile)) {
+        return [];
+    }
+    $data = file_get_contents($storageFile);
+    return json_decode($data, true) ?: [];
+}
+
+function save_store($store) {
+    global $storageFile;
+    file_put_contents($storageFile, json_encode($store));
+}
 
 header("Content-Type: application/json");
-
-// 允许 CORS 测试（可选）
 header("Access-Control-Allow-Origin: *");
+header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type");
 
-function json_response($data, $code = 200) {
-    http_response_code($code);
-    echo json_encode($data);
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(204);
     exit;
 }
 
@@ -19,11 +35,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $data = json_decode($raw, true);
 
     if (!$data || !isset($data['room']) || !isset($data['role']) || !isset($data['data'])) {
-        json_response(["error" => "Missing or invalid room/role/data"], 400);
+        http_response_code(400);
+        echo json_encode(["error" => "Missing or invalid room/role/data"]);
+        exit;
     }
 
-    $_SESSION[$data['room']][$data['role']] = $data['data'];
-    json_response(["status" => "ok"]);
+    $store = get_store();
+    if (!isset($store[$data['room']])) {
+        $store[$data['room']] = [];
+    }
+    $store[$data['room']][$data['role']] = $data['data'];
+    save_store($store);
+
+    echo json_encode(["status" => "ok"]);
+    exit;
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
@@ -31,13 +56,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     $role = $_GET['role'] ?? null;
 
     if (!$room || !$role || !in_array($role, ['sender', 'receiver'])) {
-        json_response(["error" => "Missing or invalid room/role"], 400);
+        http_response_code(400);
+        echo json_encode(["error" => "Missing or invalid room/role"]);
+        exit;
     }
 
+    $store = get_store();
     $peer = $role === 'sender' ? 'receiver' : 'sender';
-    $data = $_SESSION[$room][$peer] ?? "";
-    echo $data;
+    $data = $store[$room][$peer] ?? null;
+
+    if ($data) {
+        echo $data;
+    } else {
+        http_response_code(404);
+        echo json_encode(["error" => "Peer not found"]);
+    }
     exit;
 }
 
-json_response(["error" => "Unsupported method"], 405);
+http_response_code(405);
+echo json_encode(["error" => "Unsupported method"]);
