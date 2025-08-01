@@ -34,13 +34,13 @@ jobs:
         mkdir -p dist
         echo "Using CC: $CC"
         which $CC || (echo "Compiler not found!" && exit 1)
-        go build -v -o dist/keyforward-android-arm64 ./...
+        go build -v -o dist/stun_forward-android-arm64 ./...
 
     - name: Compress Output
       run: |
         cd dist
-        tar -czf keyforward-android-arm64.tar.gz keyforward-android-arm64
-        rm keyforward-android-arm64
+        tar -czf stun_forward-android-arm64.tar.gz stun_forward-android-arm64
+        rm stun_forward-android-arm64
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
