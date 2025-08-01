@@ -1,79 +1,101 @@
-// run.go
+// Package main - Main runner for P2P port forwarding
 package main
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"net"
 	"strconv"
 	"time"
 )
 
-func peer(mode string) string {
+// peerRole returns the opposite role for peer matching
+func peerRole(mode string) string {
 	if mode == "sender" {
 		return "receiver"
 	}
 	return "sender"
 }
 
-func Run(cfg Config) {
-	for _, m := range cfg.Mappings {
-		go handleMapping(cfg, m)
+// runForwarder starts the P2P port forwarding system
+func runForwarder(config Configuration) {
+	ctx := context.Background()
+	
+	for _, mapping := range config.Mappings {
+		go handlePortMapping(ctx, config, mapping)
 	}
-	select {} // block forever
+	
+	// Block forever
+	select {}
 }
 
-func handleMapping(cfg Config, m PortMap) {
-	log.Printf("[%s] Preparing port forward: %s %d <-> %d", cfg.Mode, m.Proto, m.LocalPort, m.RemotePort)
+// handlePortMapping handles a single port mapping configuration
+func handlePortMapping(ctx context.Context, config Configuration, mapping PortMapping) {
+	log.Printf("[%s] Starting port forward: %s %d <-> %d", 
+		config.Mode, mapping.Protocol, mapping.LocalPort, mapping.RemotePort)
 
-	log.Printf("Discovering public IP via STUN server: %s", cfg.StunServer)
-	publicAddr, err := getPublicIP(cfg.StunServer)
+	// Discover public IP via STUN server
+	log.Printf("Discovering public IP via STUN server: %s", config.STUNServer)
+	publicAddr, err := getPublicIP(config.STUNServer, 5*time.Minute)
 	if err != nil {
 		log.Fatalf("Failed to get public IP: %v", err)
 	}
 	log.Printf("Discovered public address: %s", publicAddr)
 
-	roomKey := cfg.Room + "-" + protoPortKey(m)
-	err = PostSignal(cfg.SignalURL, cfg.Mode, roomKey, publicAddr)
+	// Create signaling client
+	signalingClient := NewSignalingClient()
+	defer signalingClient.Close()
+
+	// Generate unique room key for this mapping
+	roomKey := config.RoomID + "-" + generateMappingKey(mapping)
+	
+	// Post our address to signaling server
+	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, publicAddr)
 	if err != nil {
-		log.Fatalf("Signal post failed: %v", err)
+		log.Fatalf("Failed to post signal: %v", err)
 	}
 
-	peerInfo, err := WaitForPeerData(cfg.SignalURL, peer(cfg.Mode), roomKey, 30*time.Second)
+	// Wait for peer address
+	peerAddr, err := signalingClient.WaitForPeerData(ctx, config.SignalingURL, 
+		peerRole(config.Mode), roomKey, 30*time.Second)
 	if err != nil {
-		log.Fatalf("Waiting for peer failed: %v", err)
+		log.Fatalf("Failed to get peer address: %v", err)
 	}
 
-	host, portStr, err := net.SplitHostPort(peerInfo)
+	// Parse peer address
+	host, portStr, err := net.SplitHostPort(peerAddr)
 	if err != nil {
-		log.Fatalf("Invalid peer info format: %s, error: %v", peerInfo, err)
+		log.Fatalf("Invalid peer address format %s: %v", peerAddr, err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		log.Fatalf("Invalid peer port from string '%s': %v", portStr, err)
+		log.Fatalf("Invalid peer port %s: %v", portStr, err)
 	}
 
-	if cfg.Mode == "sender" {
-		// sender connects to peer, receives from local
-		if m.Proto == "tcp" {
-			tcpSender(m.LocalPort, host, port)
+	log.Printf("Connected to peer at %s:%d", host, port)
+
+	// Start appropriate forwarder based on mode and protocol
+	if config.Mode == "sender" {
+		if mapping.Protocol == "tcp" {
+			runTCPSender(ctx, mapping.LocalPort, host, port)
 		} else {
-			udpSender(m.LocalPort, host, port)
+			runUDPSender(ctx, mapping.LocalPort, host, port)
 		}
 	} else {
-		// receiver listens on its peer port, connects to local service
-		if m.Proto == "tcp" {
-			tcpReceiver(m, host, port)
+		if mapping.Protocol == "tcp" {
+			runTCPReceiver(ctx, mapping, host, port)
 		} else {
-			udpReceiver(m, host, port)
+			runUDPReceiver(ctx, mapping, host, port)
 		}
 	}
 }
 
-func protoPortKey(m PortMap) string {
-	// Sort ports to ensure the key is the same regardless of order
-	if m.LocalPort > m.RemotePort {
-		return fmt.Sprintf("%s-%d-%d", m.Proto, m.RemotePort, m.LocalPort)
+// generateMappingKey creates a unique key for the port mapping
+func generateMappingKey(mapping PortMapping) string {
+	// Sort ports to ensure consistent key regardless of sender/receiver
+	local, remote := mapping.LocalPort, mapping.RemotePort
+	if local > remote {
+		local, remote = remote, local
 	}
-	return fmt.Sprintf("%s-%d-%d", m.Proto, m.LocalPort, m.RemotePort)
+	return mapping.Protocol + "-" + strconv.Itoa(local) + "-" + strconv.Itoa(remote)
 }

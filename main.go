@@ -22,7 +22,7 @@ func main() {
 		log.Fatalf("Failed to read config file: %v", err)
 	}
 
-	var config Config
+	var config Configuration
 	if err := json.Unmarshal(configFile, &config); err != nil {
 		log.Fatalf("Failed to parse config file: %v", err)
 	}
@@ -31,19 +31,19 @@ func main() {
 	if config.Mode != "sender" && config.Mode != "receiver" {
 		log.Fatal("Config error: 'mode' must be 'sender' or 'receiver'")
 	}
-	if config.SignalURL == "" {
-		log.Fatal("Config error: 'signalURL' is required")
+	if config.SignalingURL == "" {
+		log.Fatal("Config error: 'signalingUrl' is required")
 	}
-	if config.Room == "" {
-		log.Fatal("Config error: 'room' is required")
+	if config.RoomID == "" {
+		log.Fatal("Config error: 'roomId' is required")
 	}
 	if len(config.Mappings) == 0 {
 		log.Fatal("Config error: at least one port 'mapping' is required")
 	}
-	if config.StunServer == "" {
+	if config.STUNServer == "" {
 		// Provide a default STUN server if not specified
-		config.StunServer = "stun.l.google.com:19302"
+		config.STUNServer = "stun.l.google.com:19302"
 	}
 
-	Run(config)
+	runForwarder(config)
 }

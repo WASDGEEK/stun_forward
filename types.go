@@ -9,25 +9,32 @@ import (
 	"strings"
 )
 
-// PortMap defines a single port forwarding rule.
+// PortMapping defines a single port forwarding rule.
 // The format for the string representation is "proto:local:remote".
-type PortMap struct {
-	Proto      string `json:"proto"`
+type PortMapping struct {
+	Protocol   string `json:"protocol"`
 	LocalPort  int    `json:"localPort"`
 	RemotePort int    `json:"remotePort"`
 }
 
-// Config holds the application configuration, loaded from a JSON file.
-type Config struct {
-	Mode       string    `json:"mode"`
-	Room       string    `json:"room"`
-	SignalURL  string    `json:"signalURL"`
-	StunServer string    `json:"stunServer,omitempty"`
-	Mappings   []PortMap `json:"mappings"`
+// Configuration holds the application configuration, loaded from a JSON file.
+type Configuration struct {
+	Mode         string        `json:"mode"`
+	RoomID       string        `json:"roomId"`
+	SignalingURL string        `json:"signalingUrl"`
+	STUNServer   string        `json:"stunServer,omitempty"`
+	Mappings     []PortMapping `json:"mappings"`
 }
 
-// UnmarshalJSON allows PortMap to be parsed from a simple string format.
-func (pm *PortMap) UnmarshalJSON(data []byte) error {
+// SignalingData represents data exchanged with signaling server
+type SignalingData struct {
+	Role string `json:"role"`
+	Room string `json:"room"`
+	Data string `json:"data"`
+}
+
+// UnmarshalJSON allows PortMapping to be parsed from a simple string format.
+func (pm *PortMapping) UnmarshalJSON(data []byte) error {
 	var s string
 	if err := json.Unmarshal(data, &s); err != nil {
 		return fmt.Errorf("port map must be a string: %w", err)
@@ -49,7 +56,7 @@ func (pm *PortMap) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("invalid port numbers in map: %v, %v", err1, err2)
 	}
 
-	pm.Proto = proto
+	pm.Protocol = proto
 	pm.LocalPort = local
 	pm.RemotePort = remote
 	return nil
