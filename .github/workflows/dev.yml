@@ -1,0 +1,91 @@
+name: Go Cross-Platform Build
+
+on:
+  push:
+    branches: [ "dev" ]
+  pull_request:
+    branches: [ "dev" ]
+
+jobs:
+  build-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24.4'
+
+    - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: 0
+      run: |
+        mkdir -p dist
+        output="stun_forward-${GOOS}-${GOARCH}"
+        if [ "$GOOS" = "windows" ]; then
+          output="${output}.exe"
+        fi
+        go build -o "dist/$output" ./...
+
+    - name: Compress
+      run: |
+        cd dist
+        base="stun_forward-${{ matrix.goos }}-${{ matrix.goarch }}"
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          zip "${base}.zip" "${base}.exe"
+          rm "${base}.exe"
+        else
+          tar -czf "${base}.tar.gz" "${base}"
+          rm "${base}"
+        fi
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: builds-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: dist/
+
+  build-macos-arm64:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24.4'
+
+    - name: Build for macOS ARM64
+      env:
+        GOOS: darwin
+        GOARCH: arm64
+        CGO_ENABLED: 0
+      run: |
+        mkdir -p dist
+        go build -o dist/stun_forward-darwin-arm64 ./...
+
+    - name: Compress
+      run: |
+        cd dist
+        tar -czf stun_forward-darwin-arm64.tar.gz stun_forward-darwin-arm64
+        rm stun_forward-darwin-arm64
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-darwin-arm64
+        path: dist/
