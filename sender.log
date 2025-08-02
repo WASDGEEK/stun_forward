@@ -1,4 +1,0 @@
-2025/08/02 01:57:16 [sender] Preparing port forward: tcp 5203 <-> 5202
-2025/08/02 01:57:16 Discovering public IP via STUN server: stun.l.google.com:19302
-2025/08/02 01:57:17 Discovered public address: [2001:f40:950:4675:f95c:c8bc:595c:5b9a]:58636
-2025/08/02 01:57:31 tcpSender dial error: dial tcp [2001:f40:950:4675:f95c:c8bc:595c:5b9a]:58636: connect: connection refused

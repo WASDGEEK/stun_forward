@@ -3,11 +3,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"strconv"
 	"sync"
+	"time"
 )
 
 const (
@@ -267,6 +269,174 @@ func runTCPServerOnPort(ctx context.Context, listenPort, localServicePort int) {
 
 			wg.Wait()
 		}(conn)
+	}
+}
+
+// runUDPClientWithHolePunching runs UDP client with P2P hole punching
+func runUDPClientWithHolePunching(ctx context.Context, localPort, remotePort int, clientInfo, serverInfo *NetworkInfo) error {
+	log.Printf("🚀 Starting UDP hole punching client on port %d", localPort)
+
+	// Establish P2P connection
+	p2pConn, err := establishP2PConnection(ctx, clientInfo, serverInfo, true) // Client is initiator
+	if err != nil {
+		return fmt.Errorf("failed to establish P2P connection: %w", err)
+	}
+	defer p2pConn.Close()
+
+	// Create local listener for applications
+	localAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", localPort))
+	if err != nil {
+		return fmt.Errorf("failed to resolve local address: %w", err)
+	}
+
+	localConn, err := net.ListenUDP("udp", localAddr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on local port: %w", err)
+	}
+	defer localConn.Close()
+
+	log.Printf("✅ UDP hole punching established, proxying %d <-> P2P", localPort)
+
+	// Bidirectional forwarding between local applications and P2P connection
+	go udpForwardP2P(ctx, localConn, p2pConn, "local->p2p")
+	go udpForwardP2P(ctx, p2pConn, localConn, "p2p->local")
+
+	// Keep connection alive
+	<-ctx.Done()
+	return nil
+}
+
+// udpForwardP2P forwards UDP packets between connections
+func udpForwardP2P(ctx context.Context, src, dst net.Conn, direction string) {
+	buffer := make([]byte, UDPBufferSize)
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Set read timeout to avoid blocking indefinitely
+		src.SetReadDeadline(time.Now().Add(1 * time.Second))
+		
+		n, err := src.Read(buffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue // Timeout is expected, continue loop
+			}
+			log.Printf("UDP forward %s read error: %v", direction, err)
+			return
+		}
+
+		if n > 0 {
+			dst.SetWriteDeadline(time.Now().Add(1 * time.Second))
+			_, err = dst.Write(buffer[:n])
+			if err != nil {
+				log.Printf("UDP forward %s write error: %v", direction, err)
+				return
+			}
+		}
+	}
+}
+
+// runUDPServerWithHolePunching runs UDP server with P2P hole punching support
+func runUDPServerWithHolePunching(ctx context.Context, listenPort, localServicePort int, clientInfo, serverInfo *NetworkInfo) error {
+	log.Printf("🚀 Starting UDP hole punching server on port %d", listenPort)
+
+	// Establish P2P connection (server is not initiator)
+	p2pConn, err := establishP2PConnection(ctx, serverInfo, clientInfo, false)
+	if err != nil {
+		return fmt.Errorf("failed to establish P2P connection: %w", err)
+	}
+	defer p2pConn.Close()
+
+	log.Printf("✅ UDP hole punching established, proxying P2P <-> local service %d", localServicePort)
+
+	// Create connection to local service
+	localServiceAddr := &net.UDPAddr{
+		IP:   net.ParseIP("127.0.0.1"),
+		Port: localServicePort,
+	}
+
+	// Forward packets between P2P connection and local service
+	go udpForwardToService(ctx, p2pConn, localServiceAddr, "p2p->service")
+
+	// Keep connection alive
+	<-ctx.Done()
+	return nil
+}
+
+// udpForwardToService forwards UDP packets to local service
+func udpForwardToService(ctx context.Context, p2pConn *net.UDPConn, serviceAddr *net.UDPAddr, direction string) {
+	buffer := make([]byte, UDPBufferSize)
+	
+	// Create connection to local service
+	serviceConn, err := net.Dial("udp", serviceAddr.String())
+	if err != nil {
+		log.Printf("Failed to connect to local service: %v", err)
+		return
+	}
+	defer serviceConn.Close()
+
+	// Start bidirectional forwarding
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			// Read from P2P connection
+			p2pConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+			n, err := p2pConn.Read(buffer)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				log.Printf("UDP forward %s read error: %v", direction, err)
+				return
+			}
+
+			if n > 0 {
+				// Forward to local service
+				serviceConn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+				_, err = serviceConn.Write(buffer[:n])
+				if err != nil {
+					log.Printf("UDP forward %s write error: %v", direction, err)
+					return
+				}
+			}
+		}
+	}()
+
+	// Read responses from local service and send back to P2P
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		serviceConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		n, err := serviceConn.Read(buffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			log.Printf("UDP forward service->p2p read error: %v", err)
+			return
+		}
+
+		if n > 0 {
+			p2pConn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+			_, err = p2pConn.Write(buffer[:n])
+			if err != nil {
+				log.Printf("UDP forward service->p2p write error: %v", err)
+				return
+			}
+		}
 	}
 }
 

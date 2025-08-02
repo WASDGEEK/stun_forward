@@ -1,0 +1,4 @@
+mode: server
+roomId: "my-room-123"
+signalingUrl: "http://your-server.com/signal.php"
+stunServer: "stun.l.google.com:19302"

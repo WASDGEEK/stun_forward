@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Go-based P2P NAT traversal tool that creates tunnels between a client and server behind NATs using STUN for discovery and a PHP signaling server for coordination. It enables port forwarding without manual router configuration.
+This is an advanced Go-based P2P NAT traversal tool with **true UDP hole punching** and **dynamic mapping management**. It creates intelligent tunnels between clients and servers behind NATs using enhanced STUN discovery, comprehensive NAT type detection, and an enhanced PHP signaling server for real-time coordination. The system enables automatic port forwarding without manual router configuration while supporting hot configuration updates.
 
 ## Build and Development Commands
 
@@ -36,45 +36,67 @@ go mod download
 ### Core Components
 
 - **main.go**: Entry point, configuration validation, CLI argument parsing, supports both YAML and JSON configs
-- **types.go**: Core data structures (`Configuration`, `PortMapping`) with custom JSON/YAML unmarshaling
-- **run.go**: Main execution logic with client/server modes, LAN detection, and concurrent port mapping
-- **stun.go**: STUN client implementation for public IP discovery using github.com/pion/stun
-- **signaling.go**: HTTP client for signaling server communication (peer coordination)
-- **forwarder.go**: Protocol-specific TCP/UDP forwarding implementations
-- **index.php**: Simple PHP signaling server for peer discovery and coordination
+- **types.go**: Enhanced data structures (`Configuration`, `PortMapping`, `NetworkInfo`, `STUNResult`) with flexible JSON/YAML unmarshaling
+- **run.go**: Advanced execution logic with client/server modes, enhanced LAN detection, dynamic mapping updates, and concurrent port management
+- **stun.go**: Comprehensive STUN implementation with NAT type detection (Full Cone, Restricted Cone, Port Restricted, Symmetric NAT)
+- **holepunch.go**: Advanced UDP hole punching with simultaneous connect, port prediction, and multi-strategy fallback
+- **signaling.go**: Enhanced HTTP client with mapping update support, version control, and real-time synchronization
+- **forwarder.go**: Protocol-specific forwarding with P2P hole punching integration and relay fallback
+- **mapping_updater.go**: Dynamic mapping management with interactive CLI and hot configuration updates
+- **signaling/signaling_server_enhanced.php**: Advanced PHP signaling server with auto-cleanup, version control, and real-time updates
 
-### Client/Server Model with Dynamic Port Allocation
+### Enhanced Client/Server Model with P2P and Dynamic Management
 
-- **Client Mode**: Defines port mappings, sends requirements to server, listens on local ports
-- **Server Mode**: Dynamically allocates ports based on client requirements, forwards to local services
-- **Smart Routing**: Automatically detects LAN connections and uses direct private IP when possible
-- **Port Coordination**: Uses signaling server to exchange port allocation information
+- **Client Mode**: Defines and manages port mappings dynamically, performs NAT detection, establishes P2P or relay connections
+- **Server Mode**: Dynamically allocates ports, performs NAT detection, supports real-time mapping updates, manages P2P hole punching
+- **Smart Connection Selection**: Multi-strategy approach (LAN Direct → UDP Hole Punch → TCP/UDP Relay)
+- **Real-time Coordination**: Enhanced signaling server with version control, auto-cleanup, and live mapping synchronization
+- **Interactive Management**: CLI interface for dynamic mapping updates without service interruption
 
-### Data Flow
+### Enhanced Data Flow
 
-1. Both client/server discover public and private IPs via STUN and local network detection
-2. Server starts and waits for client (no initial data posting to prevent overwriting)
-3. Client posts network info + mapping requirements to signaling server
-4. Server retrieves client requirements and dynamically allocates available ports
-5. Server posts network info + port allocation results to signaling server
-6. Client retrieves server's port allocations (with retry mechanism) and connects to allocated ports
-7. Server forwards traffic from allocated ports to local services
+**Initial Connection:**
+1. Both client/server perform comprehensive NAT type detection and network discovery
+2. Client posts enhanced network info + mapping requirements to signaling server with version control
+3. Server retrieves client requirements and dynamically allocates available ports
+4. Server posts network info + port allocation results with mapping version tracking
+5. Connection establishment using optimal method (LAN Direct/UDP Hole Punch/TCP Relay)
+
+**Dynamic Updates:**
+6. Server continuously monitors for mapping updates via enhanced signaling protocol
+7. Client can modify mappings through interactive CLI or configuration changes
+8. Server automatically reallocates ports and establishes new connections without interruption
+9. Enhanced signaling server provides auto-cleanup (5-minute inactivity timeout)
 
 ### Key Improvements
 
-- **Race Condition Prevention**: Server waits for client before posting any data
-- **Robust Retry Logic**: Client retries up to 5 times with old format detection
-- **Flexible JSON Parsing**: PortMapping supports both string and object formats
-- **Comprehensive Debugging**: Detailed logs for troubleshooting connection issues
+- **Advanced NAT Traversal**: True UDP hole punching with multi-strategy fallback (simultaneous connect, port prediction)
+- **Real-time Dynamic Updates**: Hot mapping management without service restart
+- **Enhanced Signaling Protocol**: Version control, auto-cleanup, and conflict resolution
+- **Comprehensive NAT Detection**: Full Cone, Restricted Cone, Port Restricted, Symmetric NAT identification
+- **Smart Connection Optimization**: Automatic LAN detection and P2P optimization
+- **Interactive Management**: CLI-based mapping updates with real-time feedback
+- **Resource Management**: Automatic room cleanup and memory leak prevention
 
 ### Configuration
 
-The tool supports both YAML (.yml/.yaml) and JSON (.json) configuration files with these key fields:
+The tool supports both YAML (.yml/.yaml) and JSON (.json) configuration files with enhanced fields:
 - `mode`: "client" or "server"
-- `roomId`: Shared secret for peer matching  
-- `signalingUrl`: PHP signaling server endpoint
-- `stunServer`: STUN server for NAT traversal (optional, defaults to Google's)
-- `mappings`: Array of "protocol:localPort:remotePort" strings (client only)
+- `roomId`: Shared secret for peer matching (use cryptographically secure strings)
+- `signalingUrl`: Enhanced PHP signaling server endpoint (`signaling_server_enhanced.php` recommended)
+- `stunServer`: STUN server for NAT traversal (optional, defaults to Google's STUN)
+- `mappings`: Array of "protocol:localPort:remotePort" strings (client only, supports hot updates)
+
+**Example Enhanced Configuration:**
+```yaml
+mode: client
+roomId: "secure-random-room-id"
+signalingUrl: "https://your-server.com/signaling_server_enhanced.php"
+stunServer: "stun.l.google.com:19302"
+mappings:
+  - "udp:5000:53"    # DNS with UDP hole punching
+  - "tcp:8080:80"    # HTTP with TCP relay
+```
 
 ### LAN Detection
 
@@ -86,10 +108,10 @@ The tool implements multi-strategy LAN detection:
 ## Key Development Notes
 
 ### Architecture Changes
-- Client uses `handleClientMode` function (run.go:52) for centralized registration
-- Server uses `handleServerMode` function (run.go:196) with dynamic port allocation
-- Each port mapping runs in its own goroutine (`handlePortMappingWithAllocatedPort` function in run.go:113)
-- Server allocates ports using `allocatePortForMapping` function (run.go:165)
+- Client uses `handleClientMode` function (run.go:37) for centralized registration
+- Server uses `handleServerMode` function (run.go:40) with dynamic port allocation
+- Each port mapping runs in its own goroutine (`handlePortMappingWithAllocatedPort` function)
+- Server allocates ports using `allocatePortForMapping` function
 
 ### Data Structures
 - `ClientRegistrationData`: Contains network info + mapping requirements
@@ -97,26 +119,66 @@ The tool implements multi-strategy LAN detection:
 - `ServerPortMapping`: Maps client requirements to allocated ports
 
 ### Key Functions
-- `runTCPServerOnPort`/`runUDPServerOnPort` (forwarder.go): Listen on allocated ports, forward to local services
-- `formatClientRegistrationData`/`parseServerRegistrationData` (run.go): Handle JSON serialization
-- `handleClientMode` (run.go:52): Client registration with retry mechanism and old format detection
-- `handleServerMode` (run.go:252): Server port allocation without initial data posting
-- Configuration parsing supports flexible string-to-struct conversion via custom UnmarshalJSON/UnmarshalYAML
-- Network discovery combines STUN (public) and local interface detection (private)
-- LAN optimization bypasses STUN when peers are detected on same network
-- Graceful shutdown handling with context cancellation and signal handling
 
-### Port Allocation System
-- Server uses system port allocation (`:0`) to avoid conflicts
-- Each client mapping gets a unique server port
-- Port allocation info exchanged via signaling server
-- Supports concurrent multiple mappings without conflicts
-- Retry mechanism handles race conditions between client and server registration
-- JSON format supports both string mappings and object structures for compatibility
+**Core Network Functions:**
+- `discoverNATType` (stun.go): Comprehensive NAT type detection with multiple STUN servers
+- `performUDPHolePunching` (holepunch.go): Multi-strategy P2P connection establishment
+- `establishP2PConnection` (holepunch.go): High-level P2P connection with fallback
+- `runUDPClientWithHolePunching`/`runUDPServerWithHolePunching` (forwarder.go): P2P-enabled data forwarding
 
-### Debugging and Troubleshooting
-- Comprehensive debug logging with `DEBUG:` prefixed messages
-- Client retry attempts logged with attempt numbers
-- Server port allocation details logged for each mapping
-- Old format detection prevents premature parsing failures
-- PostSignal function includes detailed request tracking
+**Enhanced Management Functions:**
+- `handleClientMode` (run.go): Enhanced client with NAT detection and mapping management
+- `handleServerMode` (run.go): Advanced server with real-time mapping updates monitoring
+- `handleMappingUpdate` (run.go): Dynamic mapping update processing with port reallocation
+- `NewMappingUpdater` (mapping_updater.go): Interactive CLI for real-time mapping changes
+
+**Signaling Protocol Functions:**
+- `UpdateMappings` (signaling.go): Send mapping updates to enhanced signaling server
+- `WatchMappingUpdates` (signaling.go): Continuous monitoring for mapping changes
+- `CheckMappingUpdates` (signaling.go): Version-controlled update detection
+
+**Advanced Features:**
+- Enhanced configuration parsing with flexible JSON/YAML unmarshaling
+- Multi-strategy network discovery (STUN + local interface detection + NAT type analysis)
+- Smart connection optimization (LAN Direct → UDP Hole Punch → TCP/UDP Relay)
+- Resource management with automatic cleanup and memory leak prevention
+
+### Enhanced Port Allocation System
+- **Dynamic Allocation**: Server uses system port allocation (`:0`) to avoid conflicts
+- **Real-time Updates**: Supports hot reallocation when mappings change
+- **Multi-protocol Support**: Each client mapping gets optimized connection method
+- **P2P Integration**: Port allocation coordinates with hole punching requirements
+- **Version Control**: Port allocation tracking with conflict resolution
+- **Concurrent Safety**: Thread-safe port management for multiple simultaneous mappings
+- **Resource Efficiency**: Automatic port cleanup when mappings are removed
+
+### Enhanced Debugging and Troubleshooting
+
+**NAT Detection Logging:**
+- Detailed NAT type detection with multiple server testing
+- Connection method selection reasoning (LAN/P2P/Relay)
+- Hole punching attempt details and fallback triggers
+
+**Real-time Monitoring:**
+- Mapping update detection and processing logs
+- Version control and conflict resolution tracking  
+- Port allocation and deallocation lifecycle logging
+
+**Performance Analytics:**
+- Connection establishment timing and success rates
+- P2P vs relay usage statistics
+- Network optimization decision reasoning
+
+**Enhanced Debug Messages:**
+```
+🔍 NAT Detection - NAT Type: Full Cone NAT
+🎯 Using UDP hole punching for port 5000
+🔄 Detected mapping updates from client
+✅ Successfully processed mapping update - 3 new port allocations
+👀 Starting mapping updates watcher for room: my-room
+```
+
+**Troubleshooting Tools:**
+- Interactive CLI with `help` command for guided troubleshooting
+- Detailed error messages with suggested remediation steps
+- Connection diagnostics with performance recommendations

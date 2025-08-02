@@ -37,9 +37,11 @@ type SignalingData struct {
 
 // NetworkInfo contains network connection information
 type NetworkInfo struct {
-	PublicAddr  string
-	PrivateAddr string
-	IsLAN       bool
+	PublicAddr    string
+	PrivateAddr   string
+	IsLAN         bool
+	STUNResult    *STUNResult // Enhanced STUN information
+	HolePunchPort int         // Dedicated port for hole punching
 }
 
 // ClientRegistrationData contains client network info and mappings

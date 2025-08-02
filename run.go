@@ -147,51 +147,74 @@ func handleClientMode(ctx context.Context, config Configuration) {
 		go handlePortMappingWithAllocatedPort(ctx, config, clientMapping, allocatedPort, 
 			networkInfo, &serverData.NetworkInfo)
 	}
+
+	// Start mapping updater for dynamic configuration changes
+	mappingUpdater := NewMappingUpdater(config, signalingClient, roomKey, config.Mappings)
+	
+	// Option 1: Interactive CLI updater (comment out if not needed)
+	go mappingUpdater.StartInteractiveUpdater(ctx)
+	
+	// Option 2: Auto-update from config file changes (comment out if not needed)
+	// go mappingUpdater.AutoUpdateFromConfig(ctx, configPath)
+	
+	log.Printf("💡 Client ready! You can use the mapping CLI to add/remove port mappings dynamically.")
+	log.Printf("   Type 'help' in the mapping> prompt for available commands.")
 	
 	// Keep client alive
 	<-ctx.Done()
 	log.Printf("Client shutting down...")
 }
 
-// handlePortMappingWithAllocatedPort handles a single port mapping with server's allocated port
+// handlePortMappingWithAllocatedPort handles a single port mapping with enhanced P2P connection
 func handlePortMappingWithAllocatedPort(ctx context.Context, config Configuration, mapping PortMapping, 
 	allocatedPort int, clientInfo, serverInfo *NetworkInfo) {
-	log.Printf("[%s] Starting port forward: %s %d -> allocated port %d", 
+	log.Printf("[%s] Starting enhanced port forward: %s %d -> allocated port %d", 
 		config.Mode, mapping.Protocol, mapping.LocalPort, allocatedPort)
 	
-	// Determine best connection method (LAN vs WAN)
-	var targetAddr string
+	// Determine best connection method
 	isLAN := detectLANConnection(clientInfo, serverInfo)
 	
 	if isLAN {
-		// Use LAN connection to allocated port
-		targetAddr = extractIP(serverInfo.PrivateAddr) + ":" + strconv.Itoa(allocatedPort)
-		log.Printf("🏠 Using LAN connection to %s (same network detected)", targetAddr)
-	} else {
-		// Use WAN connection to allocated port
-		host, _, err := net.SplitHostPort(serverInfo.PublicAddr)
-		if err != nil {
-			log.Fatalf("Invalid server public address format %s: %v", serverInfo.PublicAddr, err)
+		// Use direct LAN connection
+		targetAddr := extractIP(serverInfo.PrivateAddr) + ":" + strconv.Itoa(allocatedPort)
+		log.Printf("🏠 Using direct LAN connection to %s", targetAddr)
+		
+		host, portStr, _ := net.SplitHostPort(targetAddr)
+		port, _ := strconv.Atoi(portStr)
+		
+		if mapping.Protocol == "tcp" {
+			runTCPClient(ctx, mapping.LocalPort, host, port)
+		} else {
+			runUDPClient(ctx, mapping.LocalPort, host, port)
 		}
-		targetAddr = host + ":" + strconv.Itoa(allocatedPort)
-		log.Printf("🌐 Using WAN connection to %s (different networks)", targetAddr)
+		return
 	}
 
-	// Parse target address
-	host, portStr, err := net.SplitHostPort(targetAddr)
-	if err != nil {
-		log.Fatalf("Invalid target address format %s: %v", targetAddr, err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		log.Fatalf("Invalid target port %s: %v", portStr, err)
-	}
-
-	// Client always listens locally and connects to server's allocated port
-	if mapping.Protocol == "tcp" {
-		runTCPClient(ctx, mapping.LocalPort, host, port)
+	// For WAN connections, use hole punching for UDP or enhanced TCP
+	if mapping.Protocol == "udp" {
+		log.Printf("🎯 Attempting UDP hole punching for mapping %d->%d", mapping.LocalPort, allocatedPort)
+		
+		// Try hole punching first
+		if clientInfo.STUNResult != nil && serverInfo.STUNResult != nil && 
+		   clientInfo.STUNResult.CanHolePunch && serverInfo.STUNResult.CanHolePunch {
+			
+			err := runUDPClientWithHolePunching(ctx, mapping.LocalPort, allocatedPort, clientInfo, serverInfo)
+			if err != nil {
+				log.Printf("❌ UDP hole punching failed: %v, falling back to relay", err)
+				// Fallback to traditional relay
+				host := extractIP(serverInfo.PublicAddr)
+				runUDPClient(ctx, mapping.LocalPort, host, allocatedPort)
+			}
+		} else {
+			log.Printf("⚠️  Hole punching not possible, using relay connection")
+			host := extractIP(serverInfo.PublicAddr)
+			runUDPClient(ctx, mapping.LocalPort, host, allocatedPort)
+		}
 	} else {
-		runUDPClient(ctx, mapping.LocalPort, host, port)
+		// TCP - use traditional connection for now (TCP hole punching is complex)
+		host := extractIP(serverInfo.PublicAddr)
+		log.Printf("🌐 Using TCP relay connection to %s:%d", host, allocatedPort)
+		runTCPClient(ctx, mapping.LocalPort, host, allocatedPort)
 	}
 }
 
@@ -345,7 +368,7 @@ func handleServerMode(ctx context.Context, config Configuration) {
 	
 	log.Printf("Server port allocation data sent to signaling server")
 
-	// Start port listeners for each allocated port
+	// Start port listeners for each allocated port with hole punching support
 	for _, portMapping := range portMappings {
 		mapping := portMapping.ClientMapping
 		allocatedPort := portMapping.AllocatedPort
@@ -356,12 +379,33 @@ func handleServerMode(ctx context.Context, config Configuration) {
 		if mapping.Protocol == "tcp" {
 			go runTCPServerOnPort(ctx, allocatedPort, mapping.RemotePort)
 		} else {
-			go runUDPServerOnPort(ctx, allocatedPort, mapping.RemotePort)
+			// Check if hole punching is possible for UDP
+			isLAN := detectLANConnection(networkInfo, &clientData.NetworkInfo)
+			if !isLAN && networkInfo.STUNResult != nil && clientData.NetworkInfo.STUNResult != nil &&
+			   networkInfo.STUNResult.CanHolePunch && clientData.NetworkInfo.STUNResult.CanHolePunch {
+				
+				log.Printf("🎯 Using UDP hole punching for port %d", allocatedPort)
+				go func(port, service int, client, server *NetworkInfo) {
+					err := runUDPServerWithHolePunching(ctx, port, service, client, server)
+					if err != nil {
+						log.Printf("❌ UDP hole punching failed for port %d: %v, falling back to relay", port, err)
+						runUDPServerOnPort(ctx, port, service)
+					}
+				}(allocatedPort, mapping.RemotePort, &clientData.NetworkInfo, networkInfo)
+			} else {
+				log.Printf("⚠️  Using UDP relay for port %d (hole punching not available)", allocatedPort)
+				go runUDPServerOnPort(ctx, allocatedPort, mapping.RemotePort)
+			}
 		}
 	}
 
 	log.Printf("Server ready! All %d port listeners started.", len(portMappings))
 	log.Printf("Press Ctrl+C to stop the server")
+
+	// Start mapping updates watcher
+	go signalingClient.WatchMappingUpdates(ctx, config.SignalingURL, roomKey, func(newClientData string) {
+		handleMappingUpdate(ctx, config, newClientData, networkInfo, signalingClient, roomKey)
+	})
 
 	// Keep server alive and periodically refresh presence
 	ticker := time.NewTicker(30 * time.Second)
@@ -384,7 +428,98 @@ func handleServerMode(ctx context.Context, config Configuration) {
 	}
 }
 
-// discoverNetworkInfo discovers both public and private network information
+// handleMappingUpdate processes mapping updates from client
+func handleMappingUpdate(ctx context.Context, config Configuration, newClientData string, networkInfo *NetworkInfo, signalingClient *SignalingClient, roomKey string) {
+	log.Printf("🔄 Processing mapping update from client...")
+	
+	// Parse new client registration data
+	newClientRegistration, err := parseClientRegistrationData(newClientData)
+	if err != nil {
+		log.Printf("❌ Failed to parse updated client data: %v", err)
+		return
+	}
+	
+	log.Printf("📋 Client updated mappings count: %d", len(newClientRegistration.Mappings))
+	
+	// Parse new mapping strings
+	var newMappings []PortMapping
+	for _, mappingStr := range newClientRegistration.Mappings {
+		var mapping PortMapping
+		err := mapping.parseFromString(mappingStr)
+		if err != nil {
+			log.Printf("❌ Failed to parse updated mapping %q: %v", mappingStr, err)
+			continue
+		}
+		newMappings = append(newMappings, mapping)
+	}
+	
+	// Allocate ports for new mappings
+	var newPortMappings []ServerPortMapping
+	for _, mapping := range newMappings {
+		allocatedPort, err := allocatePortForMapping(ctx, mapping)
+		if err != nil {
+			log.Printf("❌ Failed to allocate port for updated mapping %+v: %v", mapping, err)
+			continue
+		}
+		
+		portMapping := ServerPortMapping{
+			ClientMapping: mapping,
+			AllocatedPort: allocatedPort,
+		}
+		newPortMappings = append(newPortMappings, portMapping)
+		
+		log.Printf("🔄 Reallocated %s port %d for client mapping %d->%d", 
+			mapping.Protocol, allocatedPort, mapping.LocalPort, mapping.RemotePort)
+	}
+	
+	// Send updated port allocation back to client
+	updatedServerData, err := formatServerRegistrationData(networkInfo, newPortMappings)
+	if err != nil {
+		log.Printf("❌ Failed to format updated server registration data: %v", err)
+		return
+	}
+	
+	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, updatedServerData)
+	if err != nil {
+		log.Printf("❌ Failed to post updated server data: %v", err)
+		return
+	}
+	
+	log.Printf("✅ Successfully processed mapping update - %d new port allocations", len(newPortMappings))
+	
+	// Start new port listeners
+	for _, portMapping := range newPortMappings {
+		mapping := portMapping.ClientMapping
+		allocatedPort := portMapping.AllocatedPort
+		
+		log.Printf("🚀 Starting updated %s server on port %d -> local service %d", 
+			mapping.Protocol, allocatedPort, mapping.RemotePort)
+		
+		if mapping.Protocol == "tcp" {
+			go runTCPServerOnPort(ctx, allocatedPort, mapping.RemotePort)
+		} else {
+			// Apply same hole punching logic as initial setup
+			isLAN := detectLANConnection(networkInfo, &newClientRegistration.NetworkInfo)
+			if !isLAN && networkInfo.STUNResult != nil && newClientRegistration.NetworkInfo.STUNResult != nil &&
+			   networkInfo.STUNResult.CanHolePunch && newClientRegistration.NetworkInfo.STUNResult.CanHolePunch {
+				
+				log.Printf("🎯 Using UDP hole punching for updated port %d", allocatedPort)
+				go func(port, service int, client, server *NetworkInfo) {
+					err := runUDPServerWithHolePunching(ctx, port, service, client, server)
+					if err != nil {
+						log.Printf("❌ UDP hole punching failed for updated port %d: %v, falling back to relay", port, err)
+						runUDPServerOnPort(ctx, port, service)
+					}
+				}(allocatedPort, mapping.RemotePort, &newClientRegistration.NetworkInfo, networkInfo)
+			} else {
+				log.Printf("⚠️  Using UDP relay for updated port %d", allocatedPort)
+				go runUDPServerOnPort(ctx, allocatedPort, mapping.RemotePort)
+			}
+		}
+	}
+}
+
+// discoverNetworkInfo discovers both public and private network information with NAT detection
 func discoverNetworkInfo(stunServer string) (*NetworkInfo, error) {
 	info := &NetworkInfo{}
 
@@ -396,14 +531,48 @@ func discoverNetworkInfo(stunServer string) (*NetworkInfo, error) {
 		info.PrivateAddr = privateIP
 	}
 
-	// Get public IP via STUN
-	publicAddr, err := getPublicIP(stunServer, 5*time.Minute)
-	if err != nil {
-		return nil, err
+	// Enhanced STUN discovery with NAT type detection
+	secondarySTUN := "stun.cloudflare.com:3478" // Use Cloudflare as secondary
+	if stunServer == secondarySTUN {
+		secondarySTUN = "stun.l.google.com:19302" // Fallback to Google
 	}
-	info.PublicAddr = publicAddr
 
-	log.Printf("Network info - Private: %s, Public: %s", info.PrivateAddr, info.PublicAddr)
+	stunResult, err := discoverNATType(stunServer, secondarySTUN)
+	if err != nil {
+		// Fallback to basic STUN discovery
+		log.Printf("NAT detection failed, falling back to basic STUN: %v", err)
+		publicAddr, err := getPublicIP(stunServer, 5*time.Minute)
+		if err != nil {
+			return nil, err
+		}
+		info.PublicAddr = publicAddr
+		info.STUNResult = &STUNResult{
+			PublicAddr:   publicAddr,
+			LocalAddr:    info.PrivateAddr,
+			NATType:      NATTypeUnknown,
+			CanHolePunch: true, // Assume optimistically
+		}
+	} else {
+		info.PublicAddr = stunResult.PublicAddr
+		info.STUNResult = stunResult
+		
+		// Allocate dedicated hole punching port
+		holePunchConn, err := createHolePunchingConn("")
+		if err != nil {
+			log.Printf("Warning: Could not allocate hole punching port: %v", err)
+		} else {
+			info.HolePunchPort = holePunchConn.LocalAddr().(*net.UDPAddr).Port
+			holePunchConn.Close()
+		}
+	}
+
+	log.Printf("🔍 Network Discovery Results:")
+	log.Printf("   Private: %s", info.PrivateAddr)
+	log.Printf("   Public: %s", info.PublicAddr)
+	log.Printf("   NAT Type: %s", info.STUNResult.NATType)
+	log.Printf("   Can Hole Punch: %v", info.STUNResult.CanHolePunch)
+	log.Printf("   Hole Punch Port: %d", info.HolePunchPort)
+
 	return info, nil
 }
 

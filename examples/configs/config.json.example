@@ -1,0 +1,9 @@
+{
+  "mode": "sender",
+  "room": "mysecretroom",
+  "signalURL": "http://your-signal-server.com/index.php",
+  "stunServer": "stun.l.google.com:19302",
+  "mappings": [
+    "tcp:5001:5000"
+  ]
+}

@@ -1,9 +1,0 @@
-{
-  "mode": "receiver",
-  "room": "iperf_test_room",
-  "signalURL": "https://signal.zgentime.com",
-  "stunServer": "stun.l.google.com:19302",
-  "mappings": [
-    "tcp:5201:5202"
-  ]
-}

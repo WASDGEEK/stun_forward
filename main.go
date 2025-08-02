@@ -23,26 +23,9 @@ func main() {
 		}
 	}
 
-	// Read the configuration file
-	configFile, err := os.ReadFile(*configPath)
+	config, err := parseConfig(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to read config file: %v", err)
-	}
-
-	var config Configuration
-	// Parse based on file extension
-	ext := strings.ToLower(filepath.Ext(*configPath))
-	switch ext {
-	case ".yml", ".yaml":
-		if err := yaml.Unmarshal(configFile, &config); err != nil {
-			log.Fatalf("Failed to parse YAML config file: %v", err)
-		}
-	case ".json":
-		if err := json.Unmarshal(configFile, &config); err != nil {
-			log.Fatalf("Failed to parse JSON config file: %v", err)
-		}
-	default:
-		log.Fatalf("Unsupported config file format. Use .yml, .yaml, or .json")
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
 	// Validate configuration
@@ -69,4 +52,32 @@ func main() {
 	}
 
 	runForwarder(config)
+}
+
+// parseConfig parses configuration from file
+func parseConfig(configPath string) (Configuration, error) {
+	var config Configuration
+	
+	// Read the configuration file
+	configFile, err := os.ReadFile(configPath)
+	if err != nil {
+		return config, err
+	}
+
+	// Parse based on file extension
+	ext := strings.ToLower(filepath.Ext(configPath))
+	switch ext {
+	case ".yml", ".yaml":
+		if err := yaml.Unmarshal(configFile, &config); err != nil {
+			return config, err
+		}
+	case ".json":
+		if err := json.Unmarshal(configFile, &config); err != nil {
+			return config, err
+		}
+	default:
+		return config, os.ErrInvalid
+	}
+	
+	return config, nil
 }

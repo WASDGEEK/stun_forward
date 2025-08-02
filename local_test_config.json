@@ -1,9 +1,0 @@
-{
-  "mode": "sender",
-  "room": "local_test_room_unique_id",
-  "signalURL": "https://signal.zgentime.com",
-  "stunServer": "stun.l.google.com:19302",
-  "mappings": [
-    "tcp:8080:8081"
-  ]
-}
