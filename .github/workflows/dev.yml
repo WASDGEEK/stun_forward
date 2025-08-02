@@ -1,4 +1,4 @@
-name: Go Cross-Platform Build
+name: Go Cross-Platform Build Dev
 
 on:
   push:
