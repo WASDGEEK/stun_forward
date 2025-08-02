@@ -43,19 +43,21 @@ go mod download
 - **forwarder.go**: Protocol-specific TCP/UDP forwarding implementations
 - **index.php**: Simple PHP signaling server for peer discovery and coordination
 
-### Client/Server Model
+### Client/Server Model with Dynamic Port Allocation
 
-- **Client Mode**: Actively connects to server, defines port mappings, listens on local ports
-- **Server Mode**: Passively waits for connections, serves local services, no mapping configuration needed
+- **Client Mode**: Defines port mappings, sends requirements to server, listens on local ports
+- **Server Mode**: Dynamically allocates ports based on client requirements, forwards to local services
 - **Smart Routing**: Automatically detects LAN connections and uses direct private IP when possible
+- **Port Coordination**: Uses signaling server to exchange port allocation information
 
 ### Data Flow
 
 1. Both client/server discover public and private IPs via STUN and local network detection
-2. Post their network info to signaling server with shared room ID
-3. Client retrieves server's network info from signaling server
-4. Client determines best connection method (LAN vs WAN) based on network analysis
-5. Client establishes port forwards to server using optimal connection path
+2. Client posts network info + mapping requirements to signaling server
+3. Server retrieves client requirements and dynamically allocates available ports
+4. Server posts network info + port allocation results to signaling server
+5. Client retrieves server's port allocations and connects to allocated ports
+6. Server forwards traffic from allocated ports to local services
 
 ### Configuration
 
@@ -75,9 +77,27 @@ The tool implements multi-strategy LAN detection:
 
 ## Key Development Notes
 
-- Each port mapping runs in its own goroutine (`handlePortMapping` function in run.go:53)
-- Server mode uses continuous polling with presence refresh (run.go:147)
+### Architecture Changes
+- Client uses `handleClientMode` function (run.go:52) for centralized registration
+- Server uses `handleServerMode` function (run.go:196) with dynamic port allocation
+- Each port mapping runs in its own goroutine (`handlePortMappingWithAllocatedPort` function in run.go:113)
+- Server allocates ports using `allocatePortForMapping` function (run.go:165)
+
+### Data Structures
+- `ClientRegistrationData`: Contains network info + mapping requirements
+- `ServerRegistrationData`: Contains network info + port allocation results
+- `ServerPortMapping`: Maps client requirements to allocated ports
+
+### Key Functions
+- `runTCPServerOnPort`/`runUDPServerOnPort` (forwarder.go): Listen on allocated ports, forward to local services
+- `formatClientRegistrationData`/`parseServerRegistrationData` (run.go): Handle JSON serialization
 - Configuration parsing supports flexible string-to-struct conversion via custom UnmarshalJSON/UnmarshalYAML
 - Network discovery combines STUN (public) and local interface detection (private)
 - LAN optimization bypasses STUN when peers are detected on same network
 - Graceful shutdown handling with context cancellation and signal handling
+
+### Port Allocation System
+- Server uses system port allocation (`:0`) to avoid conflicts
+- Each client mapping gets a unique server port
+- Port allocation info exchanged via signaling server
+- Supports concurrent multiple mappings without conflicts

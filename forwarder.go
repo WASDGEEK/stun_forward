@@ -217,3 +217,92 @@ func runUDPServer(ctx context.Context, m PortMapping, peerHost string, peerPort 
 		}(buf[:n], peerAddr)
 	}
 }
+
+// runTCPServerOnPort runs TCP server on specified port, forwarding to local service
+func runTCPServerOnPort(ctx context.Context, listenPort, localServicePort int) {
+	ln, err := net.Listen("tcp", ":"+strconv.Itoa(listenPort))
+	if err != nil {
+		log.Fatalf("TCP server listen error on port %d: %v", listenPort, err)
+	}
+	defer ln.Close()
+
+	log.Printf("TCP Server listening on port %d, forwarding to local service 127.0.0.1:%d", listenPort, localServicePort)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		conn, err := ln.Accept()
+		if err != nil {
+			log.Printf("TCP server accept error: %v", err)
+			continue
+		}
+
+		go func(c net.Conn) {
+			defer c.Close()
+
+			local, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(localServicePort)))
+			if err != nil {
+				log.Printf("TCP server dial local service error: %v", err)
+				return
+			}
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			// Client to local service
+			go func() {
+				defer wg.Done()
+				tcpProxy(ctx, c, local, "client->local")
+			}()
+
+			// Local service to client
+			go func() {
+				defer wg.Done()
+				tcpProxy(ctx, local, c, "local->client")
+			}()
+
+			wg.Wait()
+		}(conn)
+	}
+}
+
+// runUDPServerOnPort runs UDP server on specified port, forwarding to local service
+func runUDPServerOnPort(ctx context.Context, listenPort, localServicePort int) {
+	localPeerAddr := net.UDPAddr{Port: listenPort}
+	conn, err := net.ListenUDP("udp", &localPeerAddr)
+	if err != nil {
+		log.Fatalf("UDP server listen error on port %d: %v", listenPort, err)
+	}
+	defer conn.Close()
+
+	localServiceAddr := net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: localServicePort}
+	buf := make([]byte, UDPBufferSize)
+
+	log.Printf("UDP Server listening on port %d, forwarding to local service 127.0.0.1:%d", listenPort, localServicePort)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		n, peerAddr, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			log.Printf("UDP server read error: %v", err)
+			continue
+		}
+
+		// Forward to local service
+		go func(data []byte, peer *net.UDPAddr) {
+			_, err := conn.WriteToUDP(data, &localServiceAddr)
+			if err != nil {
+				log.Printf("UDP server write to local service error: %v", err)
+			}
+		}(buf[:n], peerAddr)
+	}
+}

@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -31,10 +33,8 @@ func runForwarder(config Configuration) {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	
 	if config.Mode == "client" {
-		// Client mode: handle each mapping
-		for _, mapping := range config.Mappings {
-			go handlePortMapping(ctx, config, mapping)
-		}
+		// Client mode: register once and handle all mappings
+		go handleClientMode(ctx, config)
 	} else {
 		// Server mode: continuous polling for connections
 		go handleServerMode(ctx, config)
@@ -49,10 +49,9 @@ func runForwarder(config Configuration) {
 	time.Sleep(500 * time.Millisecond)
 }
 
-// handlePortMapping handles a single port mapping configuration (client mode)
-func handlePortMapping(ctx context.Context, config Configuration, mapping PortMapping) {
-	log.Printf("[%s] Starting port forward: %s %d -> %d", 
-		config.Mode, mapping.Protocol, mapping.LocalPort, mapping.RemotePort)
+// handleClientMode handles client mode - register once and handle all mappings
+func handleClientMode(ctx context.Context, config Configuration) {
+	log.Printf("[%s] Starting client mode with %d mappings", config.Mode, len(config.Mappings))
 
 	// Discover our network information
 	networkInfo, err := discoverNetworkInfo(config.STUNServer)
@@ -66,39 +65,72 @@ func handlePortMapping(ctx context.Context, config Configuration, mapping PortMa
 
 	// For client, we use server's room key format
 	roomKey := config.RoomID + "-server"
-	networkData := formatNetworkInfo(networkInfo)
 	
-	// Post our network info to signaling server
-	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, networkData)
+	// Format client registration data including mappings
+	clientData, err := formatClientRegistrationData(networkInfo, config.Mappings)
+	if err != nil {
+		log.Fatalf("Failed to format client registration data: %v", err)
+	}
+	
+	// Post our network info and mappings to signaling server
+	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, clientData)
 	if err != nil {
 		log.Fatalf("Failed to post signal: %v", err)
 	}
 
-	// Wait for server network info
-	serverNetworkData, err := signalingClient.WaitForPeerData(ctx, config.SignalingURL, 
-		peerRole(config.Mode), roomKey, 30*time.Second)
+	// Wait for server registration data (including port allocations)
+	serverRegistrationData, err := signalingClient.WaitForPeerData(ctx, config.SignalingURL, 
+		peerRole(config.Mode), roomKey, 60*time.Second)
 	if err != nil {
-		log.Fatalf("Failed to get server network info: %v", err)
+		log.Fatalf("Failed to get server registration data: %v", err)
 	}
 
-	// Parse server network info
-	serverInfo := parseNetworkInfo(serverNetworkData)
+	// Parse server registration data
+	serverData, err := parseServerRegistrationData(serverRegistrationData)
+	if err != nil {
+		log.Fatalf("Failed to parse server registration data: %v", err)
+	}
+
+	log.Printf("Received server port allocations for %d mappings", len(serverData.PortMappings))
+	
+	// Start port forwarding for each mapping with allocated ports
+	for _, portMapping := range serverData.PortMappings {
+		clientMapping := portMapping.ClientMapping
+		allocatedPort := portMapping.AllocatedPort
+		
+		log.Printf("Server allocated port %d for client mapping %d->%d", 
+			allocatedPort, clientMapping.LocalPort, clientMapping.RemotePort)
+		
+		go handlePortMappingWithAllocatedPort(ctx, config, clientMapping, allocatedPort, 
+			networkInfo, &serverData.NetworkInfo)
+	}
+	
+	// Keep client alive
+	<-ctx.Done()
+	log.Printf("Client shutting down...")
+}
+
+// handlePortMappingWithAllocatedPort handles a single port mapping with server's allocated port
+func handlePortMappingWithAllocatedPort(ctx context.Context, config Configuration, mapping PortMapping, 
+	allocatedPort int, clientInfo, serverInfo *NetworkInfo) {
+	log.Printf("[%s] Starting port forward: %s %d -> allocated port %d", 
+		config.Mode, mapping.Protocol, mapping.LocalPort, allocatedPort)
 	
 	// Determine best connection method (LAN vs WAN)
 	var targetAddr string
-	isLAN := detectLANConnection(networkInfo, serverInfo)
+	isLAN := detectLANConnection(clientInfo, serverInfo)
 	
 	if isLAN {
-		// Use LAN connection
-		targetAddr = extractIP(serverInfo.PrivateAddr) + ":" + strconv.Itoa(mapping.RemotePort)
+		// Use LAN connection to allocated port
+		targetAddr = extractIP(serverInfo.PrivateAddr) + ":" + strconv.Itoa(allocatedPort)
 		log.Printf("🏠 Using LAN connection to %s (same network detected)", targetAddr)
 	} else {
-		// Use WAN connection
+		// Use WAN connection to allocated port
 		host, _, err := net.SplitHostPort(serverInfo.PublicAddr)
 		if err != nil {
 			log.Fatalf("Invalid server public address format %s: %v", serverInfo.PublicAddr, err)
 		}
-		targetAddr = host + ":" + strconv.Itoa(mapping.RemotePort)
+		targetAddr = host + ":" + strconv.Itoa(allocatedPort)
 		log.Printf("🌐 Using WAN connection to %s (different networks)", targetAddr)
 	}
 
@@ -112,7 +144,7 @@ func handlePortMapping(ctx context.Context, config Configuration, mapping PortMa
 		log.Fatalf("Invalid target port %s: %v", portStr, err)
 	}
 
-	// Client always listens locally and connects to server
+	// Client always listens locally and connects to server's allocated port
 	if mapping.Protocol == "tcp" {
 		runTCPClient(ctx, mapping.LocalPort, host, port)
 	} else {
@@ -143,7 +175,38 @@ func generateMappingKey(mapping PortMapping) string {
 	return mapping.Protocol + "-" + strconv.Itoa(local) + "-" + strconv.Itoa(remote)
 }
 
-// handleServerMode handles server mode with continuous polling for client connections
+// allocatePortForMapping dynamically allocates a port for the mapping
+func allocatePortForMapping(ctx context.Context, mapping PortMapping) (int, error) {
+	var ln net.Listener
+	var err error
+	
+	if mapping.Protocol == "tcp" {
+		ln, err = net.Listen("tcp", ":0")
+	} else {
+		// For UDP, we need to use a different approach
+		addr, err := net.ResolveUDPAddr("udp", ":0")
+		if err != nil {
+			return 0, err
+		}
+		conn, err := net.ListenUDP("udp", addr)
+		if err != nil {
+			return 0, err
+		}
+		port := conn.LocalAddr().(*net.UDPAddr).Port
+		conn.Close()
+		return port, nil
+	}
+	
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate port for %s: %w", mapping.Protocol, err)
+	}
+	
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	return port, nil
+}
+
+// handleServerMode handles server mode - dynamic port allocation and forwarding
 func handleServerMode(ctx context.Context, config Configuration) {
 	log.Printf("[%s] Starting server mode, ready to accept connections", config.Mode)
 
@@ -157,7 +220,7 @@ func handleServerMode(ctx context.Context, config Configuration) {
 	signalingClient := NewSignalingClient()
 	defer signalingClient.Close()
 
-	// Post our network info to signaling server
+	// Initial registration with basic network info
 	roomKey := config.RoomID + "-server"
 	networkData := formatNetworkInfo(networkInfo)
 	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, networkData)
@@ -166,10 +229,72 @@ func handleServerMode(ctx context.Context, config Configuration) {
 	}
 
 	log.Printf("Server waiting for client connections...")
+	log.Printf("Waiting for client to register with mapping configuration...")
+
+	// Wait for client registration data (including mappings)
+	clientRegistrationData, err := signalingClient.WaitForPeerData(ctx, config.SignalingURL, 
+		"client", roomKey, 60*time.Second)
+	if err != nil {
+		log.Fatalf("Failed to get client registration data: %v", err)
+	}
+
+	// Parse client registration data
+	clientData, err := parseClientRegistrationData(clientRegistrationData)
+	if err != nil {
+		log.Fatalf("Failed to parse client registration data: %v", err)
+	}
+
+	log.Printf("Received client registration with %d mappings", len(clientData.Mappings))
+	
+	// Allocate dynamic ports for each mapping
+	var portMappings []ServerPortMapping
+	for _, mapping := range clientData.Mappings {
+		allocatedPort, err := allocatePortForMapping(ctx, mapping)
+		if err != nil {
+			log.Fatalf("Failed to allocate port for mapping %+v: %v", mapping, err)
+		}
+		
+		portMapping := ServerPortMapping{
+			ClientMapping: mapping,
+			AllocatedPort: allocatedPort,
+		}
+		portMappings = append(portMappings, portMapping)
+		
+		log.Printf("Allocated %s port %d for client mapping %d->%d", 
+			mapping.Protocol, allocatedPort, mapping.LocalPort, mapping.RemotePort)
+	}
+
+	// Send port allocation results back to client
+	serverData, err := formatServerRegistrationData(networkInfo, portMappings)
+	if err != nil {
+		log.Fatalf("Failed to format server registration data: %v", err)
+	}
+	
+	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, serverData)
+	if err != nil {
+		log.Fatalf("Failed to post server registration data: %v", err)
+	}
+
+	// Start port listeners for each allocated port
+	for _, portMapping := range portMappings {
+		mapping := portMapping.ClientMapping
+		allocatedPort := portMapping.AllocatedPort
+		
+		log.Printf("Starting %s server on allocated port %d -> local service 127.0.0.1:%d", 
+			mapping.Protocol, allocatedPort, mapping.RemotePort)
+		
+		if mapping.Protocol == "tcp" {
+			go runTCPServerOnPort(ctx, allocatedPort, mapping.RemotePort)
+		} else {
+			go runUDPServerOnPort(ctx, allocatedPort, mapping.RemotePort)
+		}
+	}
+
+	log.Printf("Server ready! All %d port listeners started.", len(portMappings))
 	log.Printf("Press Ctrl+C to stop the server")
 
-	// Continuous polling for client connection requests
-	ticker := time.NewTicker(5 * time.Second)
+	// Keep server alive and periodically refresh presence
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -178,12 +303,12 @@ func handleServerMode(ctx context.Context, config Configuration) {
 			log.Printf("Server shutting down...")
 			return
 		case <-ticker.C:
-			// Refresh our presence in the signaling server
-			err := signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, networkData)
+			// Refresh server registration data
+			err := signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, serverData)
 			if err != nil {
 				log.Printf("Warning: Failed to refresh server presence: %v", err)
 			} else {
-				log.Printf("Server presence refreshed")
+				log.Printf("Server presence refreshed with %d port mappings", len(portMappings))
 			}
 		}
 	}
@@ -339,7 +464,7 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// formatNetworkInfo formats network info for signaling
+// formatNetworkInfo formats network info for signaling (server only)
 func formatNetworkInfo(info *NetworkInfo) string {
 	// Add a default port to private IP if it doesn't have one
 	privateAddr := info.PrivateAddr
@@ -347,4 +472,52 @@ func formatNetworkInfo(info *NetworkInfo) string {
 		privateAddr = privateAddr + ":0" // Add port 0 as placeholder
 	}
 	return info.PublicAddr + "|" + privateAddr
+}
+
+// formatClientRegistrationData formats client registration data including mappings
+func formatClientRegistrationData(info *NetworkInfo, mappings []PortMapping) (string, error) {
+	clientData := ClientRegistrationData{
+		NetworkInfo: *info,
+		Mappings:    mappings,
+	}
+	
+	jsonData, err := json.Marshal(clientData)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal client registration data: %w", err)
+	}
+	return string(jsonData), nil
+}
+
+// parseClientRegistrationData parses client registration data from JSON
+func parseClientRegistrationData(data string) (*ClientRegistrationData, error) {
+	var clientData ClientRegistrationData
+	err := json.Unmarshal([]byte(data), &clientData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal client registration data: %w", err)
+	}
+	return &clientData, nil
+}
+
+// formatServerRegistrationData formats server registration data including port mappings
+func formatServerRegistrationData(info *NetworkInfo, portMappings []ServerPortMapping) (string, error) {
+	serverData := ServerRegistrationData{
+		NetworkInfo:  *info,
+		PortMappings: portMappings,
+	}
+	
+	jsonData, err := json.Marshal(serverData)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal server registration data: %w", err)
+	}
+	return string(jsonData), nil
+}
+
+// parseServerRegistrationData parses server registration data from JSON
+func parseServerRegistrationData(data string) (*ServerRegistrationData, error) {
+	var serverData ServerRegistrationData
+	err := json.Unmarshal([]byte(data), &serverData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal server registration data: %w", err)
+	}
+	return &serverData, nil
 }

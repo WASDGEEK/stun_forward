@@ -42,6 +42,24 @@ type NetworkInfo struct {
 	IsLAN       bool
 }
 
+// ClientRegistrationData contains client network info and mappings
+type ClientRegistrationData struct {
+	NetworkInfo NetworkInfo   `json:"networkInfo"`
+	Mappings    []PortMapping `json:"mappings"`
+}
+
+// ServerPortMapping represents a mapping between client request and server allocated port
+type ServerPortMapping struct {
+	ClientMapping PortMapping `json:"clientMapping"` // 客户端的原始mapping请求
+	AllocatedPort int         `json:"allocatedPort"`  // 服务端分配的实际端口
+}
+
+// ServerRegistrationData contains server network info and port mappings
+type ServerRegistrationData struct {
+	NetworkInfo  NetworkInfo         `json:"networkInfo"`
+	PortMappings []ServerPortMapping `json:"portMappings"`
+}
+
 // UnmarshalJSON allows PortMapping to be parsed from a simple string format.
 func (pm *PortMapping) UnmarshalJSON(data []byte) error {
 	return pm.unmarshalString(data, json.Unmarshal)

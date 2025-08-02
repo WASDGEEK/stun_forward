@@ -121,10 +121,27 @@ mappings:
 
 ## Architecture
 
-- **Client**: Actively connects to server, manages port mappings
-- **Server**: Passively waits for connections, serves local services
-- **Signaling Server**: Simple PHP script for peer discovery
+### Dynamic Port Allocation
+
+The tool uses an intelligent dynamic port allocation system to avoid port conflicts:
+
+- **Client**: Defines port mappings and listens on local ports
+- **Server**: Dynamically allocates available ports for each mapping, forwards to local services
+- **Signaling Server**: Coordinates port allocation information between client and server
 - **STUN Server**: External service for NAT traversal (only used when needed)
+
+### Data Flow
+
+```
+Local App → Client:localPort → P2P → Server:allocatedPort → Local Service:targetPort
+```
+
+**Example with mapping `"tcp:11145:5201"`:**
+```
+iperf3 client → localhost:11145 → P2P → server:45678 → iperf3 server:5201
+```
+
+The server automatically allocates port 45678 (or any available port) to avoid conflicts with the iperf3 server already running on port 5201.
 
 ## Security Notes
 
@@ -147,4 +164,22 @@ mappings:
 
 ### Port Conflicts
 - Ensure local ports on client are not already in use
-- Server ports must be available and not blocked by firewall
+- Server automatically allocates available ports to avoid conflicts
+- Check server logs to see which ports were allocated for each mapping
+
+### Server Startup Process
+1. Server starts and registers with signaling server
+2. Server waits for client to send mapping configuration
+3. Server dynamically allocates ports for each client mapping
+4. Server starts listeners on allocated ports
+5. Server sends port allocation info back to client
+6. Client connects to allocated ports for forwarding
+
+### Example Server Log Output
+```
+[server] Received client registration with 3 mappings
+[server] Allocated tcp port 45678 for client mapping 11145->5201
+[server] Allocated tcp port 45679 for client mapping 8080->22
+[server] Starting tcp server on allocated port 45678 -> local service 127.0.0.1:5201
+[server] Server ready! All 3 port listeners started.
+```
