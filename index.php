@@ -55,14 +55,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     $room = $_GET['room'] ?? null;
     $role = $_GET['role'] ?? null;
 
-    if (!$room || !$role || !in_array($role, ['sender', 'receiver'])) {
+    if (!$room || !$role || !in_array($role, ['client', 'server'])) {
         http_response_code(400);
         echo json_encode(["error" => "Missing or invalid room/role"]);
         exit;
     }
 
     $store = get_store();
-    $peer = $role === 'sender' ? 'receiver' : 'sender';
+    $peer = $role === 'client' ? 'server' : 'client';
     $data = $store[$room][$peer] ?? null;
 
     if ($data) {
