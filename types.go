@@ -44,8 +44,8 @@ type NetworkInfo struct {
 
 // ClientRegistrationData contains client network info and mappings
 type ClientRegistrationData struct {
-	NetworkInfo NetworkInfo   `json:"networkInfo"`
-	Mappings    []PortMapping `json:"mappings"`
+	NetworkInfo NetworkInfo `json:"networkInfo"`
+	Mappings    []string    `json:"mappings"` // Use string format for JSON compatibility
 }
 
 // ServerPortMapping represents a mapping between client request and server allocated port
@@ -60,9 +60,23 @@ type ServerRegistrationData struct {
 	PortMappings []ServerPortMapping `json:"portMappings"`
 }
 
-// UnmarshalJSON allows PortMapping to be parsed from a simple string format.
+// UnmarshalJSON allows PortMapping to be parsed from either string or object format.
 func (pm *PortMapping) UnmarshalJSON(data []byte) error {
-	return pm.unmarshalString(data, json.Unmarshal)
+	// Try to unmarshal as string first (for backward compatibility)
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		return pm.parseFromString(s)
+	}
+	
+	// If string parsing fails, try to unmarshal as object
+	type portMappingAlias PortMapping
+	var alias portMappingAlias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return fmt.Errorf("port map must be a string or object: %w", err)
+	}
+	
+	*pm = PortMapping(alias)
+	return nil
 }
 
 // UnmarshalYAML allows PortMapping to be parsed from a simple string format in YAML.

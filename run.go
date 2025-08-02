@@ -84,17 +84,54 @@ func handleClientMode(ctx context.Context, config Configuration) {
 		log.Fatalf("Failed to post signal: %v", err)
 	}
 
-	// Wait for server registration data (including port allocations)
-	serverRegistrationData, err := signalingClient.WaitForPeerData(ctx, config.SignalingURL, 
-		peerRole(config.Mode), roomKey, 60*time.Second)
-	if err != nil {
-		log.Fatalf("Failed to get server registration data: %v", err)
-	}
+	// Wait for server registration data with retry mechanism
+	var serverData *ServerRegistrationData
+	maxRetries := 5
+	retryDelay := 2 * time.Second
+	
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Printf("Waiting for server port allocation data (attempt %d/%d)...", attempt, maxRetries)
+		
+		serverRegistrationData, err := signalingClient.WaitForPeerData(ctx, config.SignalingURL, 
+			peerRole(config.Mode), roomKey, 15*time.Second)
+		if err != nil {
+			log.Printf("Attempt %d failed to get server data: %v", attempt, err)
+			if attempt == maxRetries {
+				log.Fatalf("Failed to get server registration data after %d attempts", maxRetries)
+			}
+			time.Sleep(retryDelay)
+			continue
+		}
 
-	// Parse server registration data
-	serverData, err := parseServerRegistrationData(serverRegistrationData)
-	if err != nil {
-		log.Fatalf("Failed to parse server registration data: %v", err)
+		// Debug: Print raw server registration data
+		log.Printf("DEBUG: Received raw server data (attempt %d): %q", attempt, serverRegistrationData)
+		log.Printf("DEBUG: Server data length: %d", len(serverRegistrationData))
+		
+		// Check if it's old format (server hasn't finished port allocation yet)
+		if strings.Contains(serverRegistrationData, "|") && !strings.HasPrefix(serverRegistrationData, "{") {
+			log.Printf("Server still sending initial data, port allocation not ready yet (attempt %d)", attempt)
+			if attempt == maxRetries {
+				log.Fatalf("Server never sent port allocation data after %d attempts", maxRetries)
+			}
+			time.Sleep(retryDelay)
+			continue
+		}
+		
+		// Try to parse server registration data
+		serverData, err = parseServerRegistrationData(serverRegistrationData)
+		if err != nil {
+			log.Printf("Failed to parse server data (attempt %d): %v", attempt, err)
+			log.Printf("Raw server data was: %q", serverRegistrationData)
+			if attempt == maxRetries {
+				log.Fatalf("Failed to parse server registration data after %d attempts", maxRetries)
+			}
+			time.Sleep(retryDelay)
+			continue
+		}
+		
+		// Success!
+		log.Printf("Successfully received server port allocation data on attempt %d", attempt)
+		break
 	}
 
 	log.Printf("Received server port allocations for %d mappings", len(serverData.PortMappings))
@@ -226,20 +263,13 @@ func handleServerMode(ctx context.Context, config Configuration) {
 	signalingClient := NewSignalingClient()
 	defer signalingClient.Close()
 
-	// Initial registration with basic network info
+	// Don't post initial data - wait for client first to avoid overwriting
 	roomKey := config.RoomID + "-server"
-	networkData := formatNetworkInfo(networkInfo)
 	
-	// Debug: Print what server is sending initially
+	// Debug: Print server setup
 	log.Printf("DEBUG: Server mode: %s", config.Mode)
 	log.Printf("DEBUG: Room key: %s", roomKey)
-	log.Printf("DEBUG: Sending server network data: %q", networkData)
 	
-	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, networkData)
-	if err != nil {
-		log.Fatalf("Failed to post signal: %v", err)
-	}
-
 	log.Printf("Server waiting for client connections...")
 	log.Printf("Waiting for client to register with mapping configuration...")
 
@@ -269,9 +299,20 @@ func handleServerMode(ctx context.Context, config Configuration) {
 
 	log.Printf("Received client registration with %d mappings", len(clientData.Mappings))
 	
+	// Parse mapping strings back to PortMapping structs
+	var parsedMappings []PortMapping
+	for _, mappingStr := range clientData.Mappings {
+		var mapping PortMapping
+		err := mapping.parseFromString(mappingStr)
+		if err != nil {
+			log.Fatalf("Failed to parse mapping string %q: %v", mappingStr, err)
+		}
+		parsedMappings = append(parsedMappings, mapping)
+	}
+	
 	// Allocate dynamic ports for each mapping
 	var portMappings []ServerPortMapping
-	for _, mapping := range clientData.Mappings {
+	for _, mapping := range parsedMappings {
 		allocatedPort, err := allocatePortForMapping(ctx, mapping)
 		if err != nil {
 			log.Fatalf("Failed to allocate port for mapping %+v: %v", mapping, err)
@@ -293,10 +334,16 @@ func handleServerMode(ctx context.Context, config Configuration) {
 		log.Fatalf("Failed to format server registration data: %v", err)
 	}
 	
+	// Debug: Print what server is sending as final registration
+	log.Printf("DEBUG: Sending final server registration data: %q", serverData)
+	log.Printf("DEBUG: Final data length: %d", len(serverData))
+	
 	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, serverData)
 	if err != nil {
 		log.Fatalf("Failed to post server registration data: %v", err)
 	}
+	
+	log.Printf("Server port allocation data sent to signaling server")
 
 	// Start port listeners for each allocated port
 	for _, portMapping := range portMappings {
@@ -499,9 +546,16 @@ func formatNetworkInfo(info *NetworkInfo) string {
 
 // formatClientRegistrationData formats client registration data including mappings
 func formatClientRegistrationData(info *NetworkInfo, mappings []PortMapping) (string, error) {
+	// Convert PortMapping structs to string format
+	var mappingStrings []string
+	for _, mapping := range mappings {
+		mappingStr := fmt.Sprintf("%s:%d:%d", mapping.Protocol, mapping.LocalPort, mapping.RemotePort)
+		mappingStrings = append(mappingStrings, mappingStr)
+	}
+	
 	clientData := ClientRegistrationData{
 		NetworkInfo: *info,
-		Mappings:    mappings,
+		Mappings:    mappingStrings,
 	}
 	
 	jsonData, err := json.Marshal(clientData)
