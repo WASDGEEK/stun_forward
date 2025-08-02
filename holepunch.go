@@ -69,26 +69,51 @@ func performUDPHolePunching(ctx context.Context, config HolePunchConfig) (*HoleP
 	}, nil
 }
 
-// tryDirectConnection attempts a direct UDP connection
+// tryDirectConnection attempts a direct UDP connection using correct local binding
 func tryDirectConnection(ctx context.Context, localAddr, remoteAddr string, timeout time.Duration) *HolePunchResult {
 	log.Printf("🎯 Trying direct connection: %s -> %s", localAddr, remoteAddr)
 
-	// Parse addresses
-	localUDPAddr, err := net.ResolveUDPAddr("udp", localAddr)
-	if err != nil {
-		return &HolePunchResult{Success: false, Error: fmt.Errorf("invalid local address: %w", err)}
-	}
-
+	// Parse remote address
 	remoteUDPAddr, err := net.ResolveUDPAddr("udp", remoteAddr)
 	if err != nil {
 		return &HolePunchResult{Success: false, Error: fmt.Errorf("invalid remote address: %w", err)}
 	}
 
-	// Create UDP connection
-	conn, err := net.ListenUDP("udp", localUDPAddr)
+	// Get actual local interface IP (NOT the STUN public address)
+	actualLocalIP, err := getLocalInterfaceIP()
 	if err != nil {
-		return &HolePunchResult{Success: false, Error: fmt.Errorf("failed to listen UDP: %w", err)}
+		log.Printf("⚠️  Failed to get local interface IP: %v, using any interface", err)
+		actualLocalIP = "0.0.0.0"
 	}
+	
+	// Extract port from STUN address for hole punching consistency
+	stunPort := extractPort(localAddr)
+	localBindAddr := &net.UDPAddr{
+		IP:   net.ParseIP(actualLocalIP),
+		Port: 0, // Start with any port
+	}
+	
+	// Try to use the same port as STUN discovery for NAT mapping consistency
+	if stunPort != "" {
+		if port, parseErr := strconv.Atoi(stunPort); parseErr == nil {
+			localBindAddr.Port = port
+			log.Printf("🎯 Trying to bind to STUN port %d on local IP %s", port, actualLocalIP)
+		}
+	}
+
+	// Create UDP connection with correct binding
+	conn, err := createReusePortUDPConn(localBindAddr)
+	if err != nil {
+		// Fallback: try with any available port
+		log.Printf("⚠️  Failed to bind to specific port, trying any port: %v", err)
+		localBindAddr.Port = 0
+		conn, err = createReusePortUDPConn(localBindAddr)
+		if err != nil {
+			return &HolePunchResult{Success: false, Error: fmt.Errorf("failed to create UDP connection: %w", err)}
+		}
+	}
+	
+	log.Printf("🔗 Successfully bound to local address: %s", conn.LocalAddr())
 
 	// Set timeout
 	deadline := time.Now().Add(timeout)

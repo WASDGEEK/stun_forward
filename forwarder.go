@@ -151,6 +151,7 @@ type UDPSession struct {
 	ClientAddr    *net.UDPAddr
 	ServerConn    *net.UDPConn
 	LastActivity  time.Time
+	ProxyStarted  bool // Track if bidirectional proxy is running
 	mutex         sync.RWMutex
 }
 
@@ -196,6 +197,7 @@ func (sm *UDPSessionManager) GetOrCreateSession(clientAddr *net.UDPAddr, remoteI
 		ClientAddr:   clientAddr,
 		ServerConn:   serverConn,
 		LastActivity: time.Now(),
+		ProxyStarted: false,
 	}
 	
 	sm.sessions[key] = session
@@ -221,7 +223,7 @@ func (sm *UDPSessionManager) CleanupExpiredSessions() {
 	}
 }
 
-// runUDPClient runs UDP client forwarding with proper session management
+// runUDPClient runs UDP client forwarding with bidirectional proxy architecture
 func runUDPClient(ctx context.Context, localPort int, remoteIP string, remotePort int) {
 	localAddr := net.UDPAddr{Port: localPort}
 	conn, err := net.ListenUDP("udp", &localAddr)
@@ -271,33 +273,126 @@ func runUDPClient(ctx context.Context, localPort int, remoteIP string, remotePor
 			continue
 		}
 
-		// Forward to remote server
-		go func(data []byte, sess *UDPSession, localConn *net.UDPConn) {
-			// Send to remote server
-			_, err := sess.ServerConn.Write(data)
-			if err != nil {
-				log.Printf("UDP client write to remote error: %v", err)
-				return
-			}
+		// Start bidirectional proxy for new sessions
+		session.mutex.Lock()
+		if !session.ProxyStarted {
+			session.ProxyStarted = true
+			session.mutex.Unlock()
 			
-			// Read response from server
-			responseBuf := make([]byte, UDPBufferSize)
-			sess.ServerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-			n, err := sess.ServerConn.Read(responseBuf)
-			if err != nil {
-				if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
-					log.Printf("UDP client read from remote error: %v", err)
-				}
-				return
-			}
-			
-			// Send response back to client
-			_, err = localConn.WriteToUDP(responseBuf[:n], sess.ClientAddr)
-			if err != nil {
-				log.Printf("UDP client write to client error: %v", err)
-			}
-		}(buf[:n], session, conn)
+			// Start continuous bidirectional forwarding
+			go runBidirectionalUDPProxy(ctx, conn, session)
+		} else {
+			session.mutex.Unlock()
+		}
+
+		// Forward this packet immediately
+		_, err = session.ServerConn.Write(buf[:n])
+		if err != nil {
+			log.Printf("UDP client write to remote error: %v", err)
+		}
 	}
+}
+
+// runBidirectionalUDPProxy runs continuous bidirectional UDP forwarding
+func runBidirectionalUDPProxy(ctx context.Context, localConn *net.UDPConn, session *UDPSession) {
+	defer func() {
+		session.mutex.Lock()
+		session.ProxyStarted = false
+		session.mutex.Unlock()
+	}()
+	
+	log.Printf("🔄 Starting bidirectional UDP proxy for client %s", session.ClientAddr)
+	
+	// Goroutine for server -> client forwarding
+	go func() {
+		buffer := make([]byte, UDPBufferSize)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			
+			// Read from server connection
+			session.ServerConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+			n, err := session.ServerConn.Read(buffer)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue // Continue on timeout
+				}
+				log.Printf("📬 Server->Client read error: %v", err)
+				return
+			}
+			
+			if n > 0 {
+				// Update session activity
+				session.mutex.Lock()
+				session.LastActivity = time.Now()
+				session.mutex.Unlock()
+				
+				// Forward to client
+				_, err = localConn.WriteToUDP(buffer[:n], session.ClientAddr)
+				if err != nil {
+					log.Printf("📬 Server->Client write error: %v", err)
+					return
+				}
+			}
+		}
+	}()
+	
+	// Keep the proxy alive
+	<-ctx.Done()
+}
+
+// runBidirectionalUDPProxyServer runs continuous bidirectional UDP forwarding for server
+func runBidirectionalUDPProxyServer(ctx context.Context, peerConn *net.UDPConn, session *UDPSession) {
+	defer func() {
+		session.mutex.Lock()
+		session.ProxyStarted = false
+		session.mutex.Unlock()
+	}()
+	
+	log.Printf("🔄 Starting bidirectional UDP proxy server for peer %s", session.ClientAddr)
+	
+	// Goroutine for local service -> peer forwarding
+	go func() {
+		buffer := make([]byte, UDPBufferSize)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			
+			// Read from local service connection
+			session.ServerConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+			n, err := session.ServerConn.Read(buffer)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue // Continue on timeout
+				}
+				log.Printf("📬 Service->Peer read error: %v", err)
+				return
+			}
+			
+			if n > 0 {
+				// Update session activity
+				session.mutex.Lock()
+				session.LastActivity = time.Now()
+				session.mutex.Unlock()
+				
+				// Forward to peer
+				_, err = peerConn.WriteToUDP(buffer[:n], session.ClientAddr)
+				if err != nil {
+					log.Printf("📬 Service->Peer write error: %v", err)
+					return
+				}
+			}
+		}
+	}()
+	
+	// Keep the proxy alive
+	<-ctx.Done()
 }
 
 // runUDPServer runs UDP server forwarding with proper session management
@@ -350,32 +445,23 @@ func runUDPServer(ctx context.Context, m PortMapping, peerHost string, peerPort 
 			continue
 		}
 
-		// Forward to local service with proper response handling
-		go func(data []byte, sess *UDPSession, serverConn *net.UDPConn) {
-			// Send to local service
-			_, err := sess.ServerConn.Write(data)
-			if err != nil {
-				log.Printf("UDP server write to local service error: %v", err)
-				return
-			}
+		// Start bidirectional proxy for new sessions
+		session.mutex.Lock()
+		if !session.ProxyStarted {
+			session.ProxyStarted = true
+			session.mutex.Unlock()
 			
-			// Read response from local service
-			responseBuf := make([]byte, UDPBufferSize)
-			sess.ServerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-			n, err := sess.ServerConn.Read(responseBuf)
-			if err != nil {
-				if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
-					log.Printf("UDP server read from local service error: %v", err)
-				}
-				return
-			}
-			
-			// Send response back to peer
-			_, err = serverConn.WriteToUDP(responseBuf[:n], sess.ClientAddr)
-			if err != nil {
-				log.Printf("UDP server write to peer error: %v", err)
-			}
-		}(buf[:n], session, conn)
+			// Start continuous bidirectional forwarding
+			go runBidirectionalUDPProxyServer(ctx, conn, session)
+		} else {
+			session.mutex.Unlock()
+		}
+
+		// Forward this packet immediately
+		_, err = session.ServerConn.Write(buf[:n])
+		if err != nil {
+			log.Printf("UDP server write to local service error: %v", err)
+		}
 	}
 }
 
@@ -465,17 +551,16 @@ func runUDPClientWithHolePunching(ctx context.Context, localPort, remotePort int
 	return nil
 }
 
-// udpForwardP2P forwards UDP packets between connections using proper UDP methods
+// udpForwardP2P forwards UDP packets between P2P connection and local application
 func udpForwardP2P(ctx context.Context, src, dst net.Conn, direction string) {
 	buffer := make([]byte, UDPBufferSize)
 	
-	// Type assert to UDP connections for proper packet handling
-	srcUDP, srcIsUDP := src.(*net.UDPConn)
-	dstUDP, dstIsUDP := dst.(*net.UDPConn)
+	log.Printf("🔄 Starting UDP P2P forwarding: %s", direction)
 	
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("🚫 UDP P2P forwarding stopped: %s", direction)
 			return
 		default:
 		}
@@ -483,39 +568,23 @@ func udpForwardP2P(ctx context.Context, src, dst net.Conn, direction string) {
 		// Set read timeout to avoid blocking indefinitely
 		src.SetReadDeadline(time.Now().Add(1 * time.Second))
 		
-		var n int
-		var err error
-		var addr *net.UDPAddr
-		
-		// Use proper UDP read method if available
-		if srcIsUDP {
-			n, addr, err = srcUDP.ReadFromUDP(buffer)
-		} else {
-			n, err = src.Read(buffer)
-		}
-		
+		n, err := src.Read(buffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue // Timeout is expected, continue loop
 			}
-			log.Printf("UDP forward %s read error: %v", direction, err)
+			log.Printf("⚠️  UDP P2P forward %s read error: %v", direction, err)
 			return
 		}
 
 		if n > 0 {
 			dst.SetWriteDeadline(time.Now().Add(1 * time.Second))
-			
-			// Use proper UDP write method if available
-			if dstIsUDP && addr != nil {
-				_, err = dstUDP.WriteToUDP(buffer[:n], addr)
-			} else {
-				_, err = dst.Write(buffer[:n])
-			}
-			
+			_, err = dst.Write(buffer[:n])
 			if err != nil {
-				log.Printf("UDP forward %s write error: %v", direction, err)
+				log.Printf("⚠️  UDP P2P forward %s write error: %v", direction, err)
 				return
 			}
+			// log.Printf("✅ P2P %s: forwarded %d bytes", direction, n)
 		}
 	}
 }
