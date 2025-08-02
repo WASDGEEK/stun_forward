@@ -13,10 +13,13 @@ A simple P2P port forwarding tool that creates secure tunnels between a **client
 
 ## How It Works
 
-1. **Server** starts and registers its network info (both public and private IPs) with the signaling server
-2. **Client** connects and discovers the server's network information
-3. **Smart Routing**: If both are on the same LAN, uses direct local connection; otherwise uses STUN for NAT traversal
-4. **Port Forwarding**: Client listens on specified local ports and forwards traffic to server ports
+1. **Server** starts and waits for client configuration
+2. **Client** connects and sends mapping requirements to signaling server
+3. **Server** receives client requirements and dynamically allocates available ports
+4. **Server** sends port allocation results back via signaling server
+5. **Client** retrieves allocated ports and establishes P2P connections
+6. **Smart Routing**: Automatically detects LAN and uses direct connection when possible
+7. **Port Forwarding**: Client forwards to server's allocated ports, server forwards to local services
 
 ## Quick Start
 
@@ -168,12 +171,18 @@ The server automatically allocates port 45678 (or any available port) to avoid c
 - Check server logs to see which ports were allocated for each mapping
 
 ### Server Startup Process
-1. Server starts and registers with signaling server
-2. Server waits for client to send mapping configuration
-3. Server dynamically allocates ports for each client mapping
+1. Server starts and waits for client configuration (no initial registration)
+2. Client sends mapping configuration to signaling server
+3. Server receives client requirements and dynamically allocates ports for each mapping
 4. Server starts listeners on allocated ports
-5. Server sends port allocation info back to client
-6. Client connects to allocated ports for forwarding
+5. Server sends port allocation info back to client via signaling server
+6. Client retrieves allocated ports and establishes forwarding connections
+
+### Retry Mechanism
+- Client automatically retries if server data is not ready
+- Detects old format data and waits for complete port allocation
+- Up to 5 retry attempts with 2-second delays
+- Comprehensive debug logging for troubleshooting
 
 ### Example Server Log Output
 ```

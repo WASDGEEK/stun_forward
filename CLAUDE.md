@@ -53,11 +53,19 @@ go mod download
 ### Data Flow
 
 1. Both client/server discover public and private IPs via STUN and local network detection
-2. Client posts network info + mapping requirements to signaling server
-3. Server retrieves client requirements and dynamically allocates available ports
-4. Server posts network info + port allocation results to signaling server
-5. Client retrieves server's port allocations and connects to allocated ports
-6. Server forwards traffic from allocated ports to local services
+2. Server starts and waits for client (no initial data posting to prevent overwriting)
+3. Client posts network info + mapping requirements to signaling server
+4. Server retrieves client requirements and dynamically allocates available ports
+5. Server posts network info + port allocation results to signaling server
+6. Client retrieves server's port allocations (with retry mechanism) and connects to allocated ports
+7. Server forwards traffic from allocated ports to local services
+
+### Key Improvements
+
+- **Race Condition Prevention**: Server waits for client before posting any data
+- **Robust Retry Logic**: Client retries up to 5 times with old format detection
+- **Flexible JSON Parsing**: PortMapping supports both string and object formats
+- **Comprehensive Debugging**: Detailed logs for troubleshooting connection issues
 
 ### Configuration
 
@@ -91,6 +99,8 @@ The tool implements multi-strategy LAN detection:
 ### Key Functions
 - `runTCPServerOnPort`/`runUDPServerOnPort` (forwarder.go): Listen on allocated ports, forward to local services
 - `formatClientRegistrationData`/`parseServerRegistrationData` (run.go): Handle JSON serialization
+- `handleClientMode` (run.go:52): Client registration with retry mechanism and old format detection
+- `handleServerMode` (run.go:252): Server port allocation without initial data posting
 - Configuration parsing supports flexible string-to-struct conversion via custom UnmarshalJSON/UnmarshalYAML
 - Network discovery combines STUN (public) and local interface detection (private)
 - LAN optimization bypasses STUN when peers are detected on same network
@@ -101,3 +111,12 @@ The tool implements multi-strategy LAN detection:
 - Each client mapping gets a unique server port
 - Port allocation info exchanged via signaling server
 - Supports concurrent multiple mappings without conflicts
+- Retry mechanism handles race conditions between client and server registration
+- JSON format supports both string mappings and object structures for compatibility
+
+### Debugging and Troubleshooting
+- Comprehensive debug logging with `DEBUG:` prefixed messages
+- Client retry attempts logged with attempt numbers
+- Server port allocation details logged for each mapping
+- Old format detection prevents premature parsing failures
+- PostSignal function includes detailed request tracking
