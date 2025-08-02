@@ -13,6 +13,21 @@ This is an advanced Go-based P2P NAT traversal tool with **true UDP hole punchin
 go build -o stun_forward .
 ```
 
+### Cross-platform builds (as used in CI)
+```bash
+# Linux AMD64
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o stun_forward-linux-amd64 .
+
+# Windows AMD64
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o stun_forward-windows-amd64.exe .
+
+# macOS ARM64
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o stun_forward-darwin-arm64 .
+
+# Android ARM64 (requires Android NDK)
+GOOS=android GOARCH=arm64 CGO_ENABLED=1 go build -o stun_forward-android-arm64 .
+```
+
 ### Run
 ```bash
 ./stun_forward --config /path/to/config.yml
@@ -23,12 +38,19 @@ go build -o stun_forward .
 ### Test
 ```bash
 go test ./...
+# Note: Currently no test files exist in the codebase
 ```
 
 ### Dependencies
 ```bash
 go mod tidy
 go mod download
+```
+
+### Format and Lint
+```bash
+go fmt ./...
+go vet ./...
 ```
 
 ## Architecture
@@ -182,3 +204,30 @@ The tool implements multi-strategy LAN detection:
 - Interactive CLI with `help` command for guided troubleshooting
 - Detailed error messages with suggested remediation steps
 - Connection diagnostics with performance recommendations
+
+## CI/CD Pipeline
+
+The project uses GitHub Actions for automated builds:
+- **go.yml**: Cross-platform builds for Linux, Windows, macOS (ARM64/AMD64)
+- **go-android-arm64.yml**: Specialized Android ARM64 builds with NDK
+- All builds use Go 1.24.4 and produce compressed artifacts
+- CGO disabled for most platforms except Android
+
+## Development Notes
+
+### Code Organization
+- Single-package structure (`main`) with focused file responsibilities
+- No external test files currently exist (opportunity for improvement)
+- Configuration supports both YAML and JSON via flexible unmarshaling
+- Extensive logging and debugging output for network operations
+
+### Key Dependencies
+- `github.com/pion/stun`: STUN protocol implementation
+- `gopkg.in/yaml.v3`: YAML configuration parsing
+- Standard Go networking libraries for UDP/TCP operations
+
+### Current Project Status
+- Active development with recent P2P and dynamic mapping features
+- Production-ready with enhanced signaling server
+- Multi-platform support including mobile (Android ARM64)
+- No formal test suite (manual testing workflow)

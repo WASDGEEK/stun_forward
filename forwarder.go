@@ -146,7 +146,82 @@ func runTCPServer(ctx context.Context, m PortMapping, peerHost string, peerPort 
 	}
 }
 
-// runUDPClient runs UDP client forwarding (listens locally, forwards to server)
+// UDPSession represents a UDP forwarding session
+type UDPSession struct {
+	ClientAddr    *net.UDPAddr
+	ServerConn    *net.UDPConn
+	LastActivity  time.Time
+	mutex         sync.RWMutex
+}
+
+// UDPSessionManager manages UDP forwarding sessions
+type UDPSessionManager struct {
+	sessions map[string]*UDPSession
+	mutex    sync.RWMutex
+	timeout  time.Duration
+}
+
+// NewUDPSessionManager creates a new session manager
+func NewUDPSessionManager(timeout time.Duration) *UDPSessionManager {
+	return &UDPSessionManager{
+		sessions: make(map[string]*UDPSession),
+		timeout:  timeout,
+	}
+}
+
+// GetOrCreateSession gets or creates a session for a client
+func (sm *UDPSessionManager) GetOrCreateSession(clientAddr *net.UDPAddr, remoteIP string, remotePort int) (*UDPSession, error) {
+	key := clientAddr.String()
+	
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	
+	session, exists := sm.sessions[key]
+	if exists {
+		// Update activity and return existing session
+		session.mutex.Lock()
+		session.LastActivity = time.Now()
+		session.mutex.Unlock()
+		return session, nil
+	}
+	
+	// Create new session with connection to remote server
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP(remoteIP), Port: remotePort}
+	serverConn, err := net.DialUDP("udp", nil, remoteAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to remote server: %w", err)
+	}
+	
+	session = &UDPSession{
+		ClientAddr:   clientAddr,
+		ServerConn:   serverConn,
+		LastActivity: time.Now(),
+	}
+	
+	sm.sessions[key] = session
+	return session, nil
+}
+
+// CleanupExpiredSessions removes expired sessions
+func (sm *UDPSessionManager) CleanupExpiredSessions() {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	
+	now := time.Now()
+	for key, session := range sm.sessions {
+		session.mutex.RLock()
+		expired := now.Sub(session.LastActivity) > sm.timeout
+		session.mutex.RUnlock()
+		
+		if expired {
+			session.ServerConn.Close()
+			delete(sm.sessions, key)
+			log.Printf("UDP session expired for client %s", key)
+		}
+	}
+}
+
+// runUDPClient runs UDP client forwarding with proper session management
 func runUDPClient(ctx context.Context, localPort int, remoteIP string, remotePort int) {
 	localAddr := net.UDPAddr{Port: localPort}
 	conn, err := net.ListenUDP("udp", &localAddr)
@@ -155,10 +230,26 @@ func runUDPClient(ctx context.Context, localPort int, remoteIP string, remotePor
 	}
 	defer conn.Close()
 
-	remoteAddr := net.UDPAddr{IP: net.ParseIP(remoteIP), Port: remotePort}
+	// Create session manager with 5-minute timeout
+	sessionManager := NewUDPSessionManager(5 * time.Minute)
 	buf := make([]byte, UDPBufferSize)
 	
 	log.Printf("UDP Client listening on port %d, forwarding to %s:%d", localPort, remoteIP, remotePort)
+
+	// Start cleanup goroutine
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sessionManager.CleanupExpiredSessions()
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -173,17 +264,43 @@ func runUDPClient(ctx context.Context, localPort int, remoteIP string, remotePor
 			continue
 		}
 
+		// Get or create session for this client
+		session, err := sessionManager.GetOrCreateSession(clientAddr, remoteIP, remotePort)
+		if err != nil {
+			log.Printf("Failed to create session for %s: %v", clientAddr, err)
+			continue
+		}
+
 		// Forward to remote server
-		go func(data []byte, client *net.UDPAddr) {
-			_, err := conn.WriteToUDP(data, &remoteAddr)
+		go func(data []byte, sess *UDPSession, localConn *net.UDPConn) {
+			// Send to remote server
+			_, err := sess.ServerConn.Write(data)
 			if err != nil {
 				log.Printf("UDP client write to remote error: %v", err)
+				return
 			}
-		}(buf[:n], clientAddr)
+			
+			// Read response from server
+			responseBuf := make([]byte, UDPBufferSize)
+			sess.ServerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, err := sess.ServerConn.Read(responseBuf)
+			if err != nil {
+				if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+					log.Printf("UDP client read from remote error: %v", err)
+				}
+				return
+			}
+			
+			// Send response back to client
+			_, err = localConn.WriteToUDP(responseBuf[:n], sess.ClientAddr)
+			if err != nil {
+				log.Printf("UDP client write to client error: %v", err)
+			}
+		}(buf[:n], session, conn)
 	}
 }
 
-// runUDPServer runs UDP server forwarding (accepts packets, forwards to local service)
+// runUDPServer runs UDP server forwarding with proper session management
 func runUDPServer(ctx context.Context, m PortMapping, peerHost string, peerPort int) {
 	localPeerAddr := net.UDPAddr{Port: m.RemotePort}
 	conn, err := net.ListenUDP("udp", &localPeerAddr)
@@ -192,10 +309,26 @@ func runUDPServer(ctx context.Context, m PortMapping, peerHost string, peerPort 
 	}
 	defer conn.Close()
 
-	localServiceAddr := net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: m.LocalPort}
+	// Create session manager for peer connections
+	sessionManager := NewUDPSessionManager(5 * time.Minute)
 	buf := make([]byte, UDPBufferSize)
 
 	log.Printf("UDP Server listening on port %d, forwarding to local service 127.0.0.1:%d", m.RemotePort, m.LocalPort)
+
+	// Start cleanup goroutine
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sessionManager.CleanupExpiredSessions()
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -210,13 +343,39 @@ func runUDPServer(ctx context.Context, m PortMapping, peerHost string, peerPort 
 			continue
 		}
 
-		// Forward to local service
-		go func(data []byte, peer *net.UDPAddr) {
-			_, err := conn.WriteToUDP(data, &localServiceAddr)
+		// Get or create session for this peer
+		session, err := sessionManager.GetOrCreateSession(peerAddr, "127.0.0.1", m.LocalPort)
+		if err != nil {
+			log.Printf("Failed to create session for peer %s: %v", peerAddr, err)
+			continue
+		}
+
+		// Forward to local service with proper response handling
+		go func(data []byte, sess *UDPSession, serverConn *net.UDPConn) {
+			// Send to local service
+			_, err := sess.ServerConn.Write(data)
 			if err != nil {
 				log.Printf("UDP server write to local service error: %v", err)
+				return
 			}
-		}(buf[:n], peerAddr)
+			
+			// Read response from local service
+			responseBuf := make([]byte, UDPBufferSize)
+			sess.ServerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, err := sess.ServerConn.Read(responseBuf)
+			if err != nil {
+				if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+					log.Printf("UDP server read from local service error: %v", err)
+				}
+				return
+			}
+			
+			// Send response back to peer
+			_, err = serverConn.WriteToUDP(responseBuf[:n], sess.ClientAddr)
+			if err != nil {
+				log.Printf("UDP server write to peer error: %v", err)
+			}
+		}(buf[:n], session, conn)
 	}
 }
 
@@ -306,9 +465,13 @@ func runUDPClientWithHolePunching(ctx context.Context, localPort, remotePort int
 	return nil
 }
 
-// udpForwardP2P forwards UDP packets between connections
+// udpForwardP2P forwards UDP packets between connections using proper UDP methods
 func udpForwardP2P(ctx context.Context, src, dst net.Conn, direction string) {
 	buffer := make([]byte, UDPBufferSize)
+	
+	// Type assert to UDP connections for proper packet handling
+	srcUDP, srcIsUDP := src.(*net.UDPConn)
+	dstUDP, dstIsUDP := dst.(*net.UDPConn)
 	
 	for {
 		select {
@@ -320,7 +483,17 @@ func udpForwardP2P(ctx context.Context, src, dst net.Conn, direction string) {
 		// Set read timeout to avoid blocking indefinitely
 		src.SetReadDeadline(time.Now().Add(1 * time.Second))
 		
-		n, err := src.Read(buffer)
+		var n int
+		var err error
+		var addr *net.UDPAddr
+		
+		// Use proper UDP read method if available
+		if srcIsUDP {
+			n, addr, err = srcUDP.ReadFromUDP(buffer)
+		} else {
+			n, err = src.Read(buffer)
+		}
+		
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue // Timeout is expected, continue loop
@@ -331,7 +504,14 @@ func udpForwardP2P(ctx context.Context, src, dst net.Conn, direction string) {
 
 		if n > 0 {
 			dst.SetWriteDeadline(time.Now().Add(1 * time.Second))
-			_, err = dst.Write(buffer[:n])
+			
+			// Use proper UDP write method if available
+			if dstIsUDP && addr != nil {
+				_, err = dstUDP.WriteToUDP(buffer[:n], addr)
+			} else {
+				_, err = dst.Write(buffer[:n])
+			}
+			
 			if err != nil {
 				log.Printf("UDP forward %s write error: %v", direction, err)
 				return
