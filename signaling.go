@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 )
@@ -33,6 +34,9 @@ func NewSignalingClient() *SignalingClient {
 
 // PostSignal sends signal data to signaling server
 func (c *SignalingClient) PostSignal(url, role, room, data string) error {
+	// Debug: Print what's being sent to signaling server
+	log.Printf("DEBUG: PostSignal - URL: %s, Role: %s, Room: %s, DataLen: %d", url, role, room, len(data))
+	
 	body, err := json.Marshal(SignalingData{Role: role, Room: room, Data: data})
 	if err != nil {
 		return fmt.Errorf("json marshal error: %w", err)

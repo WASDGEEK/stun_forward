@@ -62,8 +62,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 
     $store = get_store();
-    $peer = $role === 'client' ? 'server' : 'client';
-    $data = $store[$room][$peer] ?? null;
+    // Get data for the requested role (not peer role)
+    $data = $store[$room][$role] ?? null;
 
     if ($data) {
         echo $data;

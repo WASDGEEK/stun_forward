@@ -72,6 +72,12 @@ func handleClientMode(ctx context.Context, config Configuration) {
 		log.Fatalf("Failed to format client registration data: %v", err)
 	}
 	
+	// Debug: Print what client is sending
+	log.Printf("DEBUG: Client mode: %s", config.Mode)
+	log.Printf("DEBUG: Room key: %s", roomKey)
+	log.Printf("DEBUG: Sending client registration data: %q", clientData)
+	log.Printf("DEBUG: Data length: %d", len(clientData))
+	
 	// Post our network info and mappings to signaling server
 	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, clientData)
 	if err != nil {
@@ -223,6 +229,12 @@ func handleServerMode(ctx context.Context, config Configuration) {
 	// Initial registration with basic network info
 	roomKey := config.RoomID + "-server"
 	networkData := formatNetworkInfo(networkInfo)
+	
+	// Debug: Print what server is sending initially
+	log.Printf("DEBUG: Server mode: %s", config.Mode)
+	log.Printf("DEBUG: Room key: %s", roomKey)
+	log.Printf("DEBUG: Sending server network data: %q", networkData)
+	
 	err = signalingClient.PostSignal(config.SignalingURL, config.Mode, roomKey, networkData)
 	if err != nil {
 		log.Fatalf("Failed to post signal: %v", err)
@@ -238,10 +250,21 @@ func handleServerMode(ctx context.Context, config Configuration) {
 		log.Fatalf("Failed to get client registration data: %v", err)
 	}
 
+	// Debug: Print raw client registration data
+	log.Printf("DEBUG: Received raw client data: %q", clientRegistrationData)
+	log.Printf("DEBUG: Client data length: %d", len(clientRegistrationData))
+	
 	// Parse client registration data
 	clientData, err := parseClientRegistrationData(clientRegistrationData)
 	if err != nil {
-		log.Fatalf("Failed to parse client registration data: %v", err)
+		log.Printf("ERROR: Failed to parse client registration data: %v", err)
+		log.Printf("ERROR: Raw data was: %q", clientRegistrationData)
+		
+		// Try to detect if it's old format (network info string)
+		if strings.Contains(clientRegistrationData, "|") && !strings.HasPrefix(clientRegistrationData, "{") {
+			log.Printf("ERROR: Detected old network info format. Client might be using old version.")
+		}
+		log.Fatalf("Client registration parsing failed")
 	}
 
 	log.Printf("Received client registration with %d mappings", len(clientData.Mappings))
